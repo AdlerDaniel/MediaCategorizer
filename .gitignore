@@ -1,0 +1,12 @@
+# Generated files
+build/
+dist/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+*.part
