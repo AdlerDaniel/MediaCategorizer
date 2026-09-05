@@ -1,4 +1,5 @@
 """Real install/update/uninstall smoke. Refuses an existing user installation."""
+import argparse
 import ctypes
 import hashlib
 import json
@@ -30,6 +31,9 @@ def digest(file):
     return hashlib.sha256(file.read_bytes()).hexdigest()
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--baseline', type=Path, help='Older Setup EXE to test a real version upgrade')
+    args = parser.parse_args()
     assert value(KEY, 'InstallDir') is None and value(UNINSTALL, 'DisplayName') is None, 'Existing installation: use a clean Windows user for this test.'
     report = {}
     logs = ROOT / 'build/installer-qa'
@@ -44,7 +48,7 @@ def main():
         journal = settings.with_name('processing_log_v4.jsonl')
         journal.write_text('{"action":"sentinel"}\n')
         original = settings.read_bytes(), journal.read_bytes()
-        setup = ROOT / ('dist/MediaCategorizer-Setup-' + APP_VERSION + '.exe')
+        setup = args.baseline.resolve() if args.baseline else ROOT / ('dist/MediaCategorizer-Setup-' + APP_VERSION + '.exe')
         update = ROOT / ('dist/MediaCategorizer-Update-' + APP_VERSION + '.exe')
         def execute(exe, name, *args, success=True):
             result = subprocess.run([str(exe), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/LOG=' + str(logs / (name+'.log')), *args], env=env, timeout=60)
@@ -57,10 +61,15 @@ def main():
             assert value(UNINSTALL, 'DisplayName').startswith('Media Categorizer')
             executable = target / 'MediaCategorizer.exe'
             expected = digest(ROOT / 'dist/MediaCategorizer.exe')
-            assert digest(executable) == expected
-            # Simulate an older payload and version, then prove replacement.
-            executable.write_bytes(b'old release fixture')
-            set_version('4.9.0')
+            if args.baseline:
+                assert value(KEY, 'Version') != APP_VERSION
+                assert digest(executable) != expected
+                report['baseline_version'] = value(KEY, 'Version')
+            else:
+                assert digest(executable) == expected
+                # Simulate an older payload and version, then prove replacement.
+                executable.write_bytes(b'old release fixture')
+                set_version('4.9.0')
             execute(update, 'update', '/DIR=' + str(base / 'WrongFolder'))
             assert digest(executable) == expected
             assert not (base / 'WrongFolder').exists()

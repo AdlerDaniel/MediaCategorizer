@@ -13,6 +13,8 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QWheelEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 from media_categorizer_v4_5 import MediaCategorizer
+from media_categorizer.photo_editor import PhotoEditor
+from PySide6.QtCore import QRect
 
 
 def sample_image(width=800, height=600):
@@ -78,6 +80,22 @@ def main():
         window.load_folder(media)
         settle()
         window.grab().save(str(output / "photo-fit.png"))
+        editor = PhotoEditor(media / "a_photo.png", window)
+        editor.setAttribute(Qt.WA_ShowWithoutActivating)
+        editor.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
+        editor.show()
+        editor.canvas.selection = QRect(100, 80, 500, 400)
+        editor.update_controls()
+        settle()
+        editor.grab().save(str(output / "editor-dark.png"))
+        window.toggle_theme()
+        settle()
+        editor.grab().save(str(output / "editor-light.png"))
+        window.toggle_theme()
+        editor.reset()
+        editor.close()
+        editor.deleteLater()
+        settle()
         window.toggle_theme()
         settle()
         window.grab().save(str(output / "photo-light.png"))

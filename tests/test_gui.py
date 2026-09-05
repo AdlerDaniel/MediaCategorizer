@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QThreadPool, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QRect, QPoint, QPointF, QThreadPool, Qt
 from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -119,6 +119,26 @@ class WindowTests(unittest.TestCase):
             for child in panel.findChildren(QPushButton):
                 if child.isVisible():
                     self.assertTrue(panel.rect().contains(child.geometry()), child.toolTip())
+
+    def test_editor_reloads_image_and_rejects_stale_preloads(self):
+        from media_categorizer.photo_editor import PhotoEditor
+        path = self.window.current_file
+        stale = QImage(self.window.current_image)
+        def edit(dialog):
+            self.assertTrue(self.window.file_reservations.is_busy(path))
+            self.assertFalse(self.window.edit_photo_btn.isEnabled())
+            dialog.canvas.selection = QRect(10, 10, 100, 80)
+            dialog.save()
+            return dialog.result()
+        with patch.object(PhotoEditor, 'exec', edit):
+            self.window.edit_photo()
+        self.assertFalse(self.window.file_reservations.is_busy(path))
+        self.assertTrue(self.window.edit_photo_btn.isEnabled())
+        self.assertEqual(self.window.current_image.width(), 100)
+        self.window._on_image_preloaded(str(path), stale, 0)
+        self.window._on_thumbnail_loaded(str(path), stale, 0)
+        self.assertEqual(self.window._take_cached_image(path).width(), 100)
+        self.assertEqual(QImage(str(path)).height(), 80)
 
     def test_busy_source_blocks_buttons_and_keyboard_actions(self):
         original = self.window.current_file

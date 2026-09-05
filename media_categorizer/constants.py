@@ -1,6 +1,6 @@
 from collections import OrderedDict
 
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0"
 APP_NAME = "Media Categorizer"
 APP_FOLDER = "MediaCategorizer"
 

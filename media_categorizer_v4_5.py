@@ -64,6 +64,7 @@ from media_categorizer.file_operations import FileReservations, perform_file_ope
 from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, VideoViewport
 
 
+from media_categorizer.photo_editor import PhotoEditor
 from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon
 
 RESERVED_SHORTCUTS = {
@@ -246,18 +247,19 @@ def hamming_distance(a: int, b: int) -> int:
 
 
 class ImageLoadSignals(QObject):
-    loaded = Signal(str, QImage)
+    loaded = Signal(str, QImage, int)
 
 
 class ImageLoadTask(QRunnable):
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, revision=0):
         super().__init__()
         self.path = Path(path)
+        self.revision = revision
         self.signals = ImageLoadSignals()
 
     def run(self):
         image = read_oriented_image(self.path) if self.path.exists() else QImage()
-        self.signals.loaded.emit(str(self.path), image)
+        self.signals.loaded.emit(str(self.path), image, self.revision)
 
 
 class DestinationEditor(QWidget):
@@ -619,10 +621,11 @@ class ThumbnailSignals(QObject):
 
 
 class ThumbnailTask(QRunnable):
-    def __init__(self, path: Path, size=QSize(160, 96)):
+    def __init__(self, path: Path, size=QSize(160, 96), revision=0):
         super().__init__()
         self.path = Path(path)
         self.size = QSize(size)
+        self.revision = revision
         self.signals = ThumbnailSignals()
 
     def run(self):
@@ -635,7 +638,7 @@ class ThumbnailTask(QRunnable):
                 scaled = raw_size.scaled(QSize(self.size.width() * 2, self.size.height() * 2), Qt.KeepAspectRatio)
                 reader.setScaledSize(scaled)
             image = reader.read()
-        self.signals.loaded.emit(str(self.path), image)
+        self.signals.loaded.emit(str(self.path), image, self.revision)
 
 
 class FileOperationSignals(QObject):
@@ -915,6 +918,7 @@ class MediaCategorizer(QMainWindow):
         self.image_cache = OrderedDict()
         self.image_cache_bytes = 0
         self.pending_image_loads = set()
+        self.image_revisions = {}
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(max(2, min(4, self.thread_pool.maxThreadCount())))
 
@@ -990,6 +994,8 @@ class MediaCategorizer(QMainWindow):
         self.apply_tags_btn.setProperty("primary", True)
         self.loop_btn = ToggleSwitch("Повтор")
         self.sound_btn = ToggleSwitch("Звук")
+        self.edit_photo_btn = IconButton("pencil", "Редактировать")
+        self.edit_photo_btn.clicked.connect(self.edit_photo)
         self.rotate_left_btn = IconButton("rotate-ccw", "Повернуть влево", compact=True)
         self.rotate_right_btn = IconButton("rotate-cw", "Повернуть вправо", compact=True)
         self.thumbnail_toggle_btn = IconButton("images", "Миниатюры", compact=True)
@@ -1025,6 +1031,7 @@ class MediaCategorizer(QMainWindow):
         tools_layout.setContentsMargins(0, 0, 0, 0)
         tools_layout.addWidget(self.multi_btn)
         tools_layout.addWidget(self.apply_tags_btn)
+        tools_layout.addWidget(self.edit_photo_btn)
         tools_layout.addWidget(self.rotate_left_btn)
         tools_layout.addWidget(self.rotate_right_btn)
         tools_layout.addSpacing(8)
@@ -1446,6 +1453,39 @@ class MediaCategorizer(QMainWindow):
             self.update_file_properties()
         QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
+    def edit_photo(self):
+        path = self.current_file
+        if not path or path.suffix.lower() not in IMAGE_EXTENSIONS:
+            return
+        operation_id = 'editor-' + uuid.uuid4().hex
+        try:
+            self.file_reservations.acquire(operation_id, path)
+        except RuntimeError as exc:
+            QMessageBox.information(self, APP_NAME, str(exc))
+            return
+        dialog = None
+        try:
+            self.update_controls()
+            dialog = PhotoEditor(path, self)
+            if dialog.exec() == QDialog.Accepted:
+                key = str(path)
+                self.image_revisions[key] = self.image_revisions.get(key, 0) + 1
+                self._drop_cache_path(path)
+                self.thumbnail_cache.pop(key, None)
+                image = read_oriented_image(path)
+                self._cache_image(path, image)
+                self._cache_thumbnail(path, image)
+                self.append_log('EDIT', path, path, detail='Отражение / обрезка; исходное фото заменено')
+                if self.current_file == path:
+                    self.show_current_file()
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Редактор фото', str(exc))
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
+            self.file_reservations.release(operation_id)
+            self.update_controls()
+
     # ---------- Zoom ----------
     def set_zoom_percent(self, value):
         value = max(25, min(400, int(value)))
@@ -1688,14 +1728,16 @@ class MediaCategorizer(QMainWindow):
         if key in self.image_cache or key in self.pending_image_loads or not path.exists():
             return
         self.pending_image_loads.add(key)
-        task = ImageLoadTask(path)
+        task = ImageLoadTask(path, self.image_revisions.get(key, 0))
         task.signals.loaded.connect(self._on_image_preloaded)
         # Keep task/signals alive until the queued signal is delivered.
-        task.signals.loaded.connect(lambda _p, _i, t=task: None)
+        task.signals.loaded.connect(lambda _p, _i, _r, t=task: None)
         self.thread_pool.start(task)
 
-    def _on_image_preloaded(self, path_str, image):
+    def _on_image_preloaded(self, path_str, image, revision=0):
         self.pending_image_loads.discard(path_str)
+        if revision != self.image_revisions.get(path_str, 0):
+            return
         path = Path(path_str)
         if not image.isNull() and path.exists():
             self._cache_image(path, image)
@@ -1775,13 +1817,15 @@ class MediaCategorizer(QMainWindow):
         if path.suffix.lower() not in IMAGE_EXTENSIONS or not path.exists():
             return
         self.pending_thumbnail_loads.add(key)
-        task = ThumbnailTask(path)
+        task = ThumbnailTask(path, revision=self.image_revisions.get(key, 0))
         task.signals.loaded.connect(self._on_thumbnail_loaded)
-        task.signals.loaded.connect(lambda _p, _i, t=task: None)
+        task.signals.loaded.connect(lambda _p, _i, _r, t=task: None)
         self.thread_pool.start(task)
 
-    def _on_thumbnail_loaded(self, path_str, image):
+    def _on_thumbnail_loaded(self, path_str, image, revision=0):
         self.pending_thumbnail_loads.discard(path_str)
+        if revision != self.image_revisions.get(path_str, 0):
+            return
         if not image.isNull():
             self._cache_thumbnail(Path(path_str), image)
 
@@ -2798,6 +2842,7 @@ class MediaCategorizer(QMainWindow):
         self.right_nav_btn.setEnabled(bool(self.files and has_current and self.current_index < len(self.files) - 1))
         self.undo_btn.setEnabled(self._can_undo())
         busy = has_current and self.file_reservations.is_busy(self.current_file)
+        self.edit_photo_btn.setEnabled(bool(has_current and not busy and self.current_file.suffix.lower() in IMAGE_EXTENSIONS))
         for button in self.category_buttons.values():
             button.setEnabled(has_current and not busy)
         self.undo_btn.setToolTip("Дождитесь завершения операции с этим файлом"
