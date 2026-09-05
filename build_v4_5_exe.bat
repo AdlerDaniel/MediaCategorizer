@@ -8,10 +8,13 @@ if errorlevel 1 goto :error
 python -m unittest discover -s tests -v
 if errorlevel 1 goto :error
 
+python tools/prepare_release.py
+if errorlevel 1 goto :error
+
 python tools/build_exe.py
 if errorlevel 1 goto :error
 
-echo Done: dist\MediaCategorizer4_5.exe
+echo Done: dist\MediaCategorizer.exe
 pause
 exit /b 0
 

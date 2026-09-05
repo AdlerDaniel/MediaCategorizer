@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QThreadPool, Qt
 from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from media_categorizer_v4_5 import FileOperationTask, MediaCategorizer
 
@@ -85,6 +85,40 @@ class WindowTests(unittest.TestCase):
     def complete_next(self):
         self.pool.tasks.pop(0).run()
         self.app.processEvents()
+
+    def test_theme_round_trip_preserves_categories(self):
+        from media_categorizer.settings import load_settings
+        original = self.app.palette().window().color()
+        self.window.theme_btn.click()
+        self.assertNotEqual(original, self.app.palette().window().color())
+        saved = load_settings()
+        self.assertEqual(saved['theme'], 'light')
+        self.assertEqual(saved['categories'], self.window.categories)
+        self.window.close()
+        other = TestWindow()
+        try:
+            self.assertEqual(self.app.property('theme'), 'light')
+            self.assertEqual(other.theme_btn.icon_name, 'moon')
+            other.theme_btn.click()
+            self.assertEqual(load_settings()['theme'], 'dark')
+        finally:
+            other.close()
+            other.deleteLater()
+
+    def test_custom_switch_keyboard_and_compact_layout(self):
+        from PySide6.QtTest import QTest
+        self.window.multi_btn.setFocus()
+        QTest.keyClick(self.window.multi_btn, Qt.Key_Space)
+        self.assertTrue(self.window.multi_btn.isChecked())
+        self.assertTrue(self.window.apply_tags_btn.isVisible())
+        self.window.resize(1400, 720)
+        self.app.processEvents()
+        self.assertLessEqual(self.window.width(), 1400)
+        self.assertGreater(self.window.media_stack.height(), 300)
+        for panel in (self.window.top_widget, self.window.tools_widget):
+            for child in panel.findChildren(QPushButton):
+                if child.isVisible():
+                    self.assertTrue(panel.rect().contains(child.geometry()), child.toolTip())
 
     def test_busy_source_blocks_buttons_and_keyboard_actions(self):
         original = self.window.current_file

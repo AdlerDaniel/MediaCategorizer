@@ -4,6 +4,8 @@ from PySide6.QtMultimedia import QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget, QSizePolicy
 from .view_geometry import PanZoom
+from .ui import COLORS
+from PySide6.QtGui import QColor
 
 
 class PanZoomInput:
@@ -169,6 +171,8 @@ class ImageCanvas(PanZoomInput, QWidget):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(COLORS[QApplication.instance().property("theme") or "dark"]["canvas"]))
+        painter.setPen(self.palette().windowText().color())
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         if self._image.isNull():

@@ -1,4 +1,4 @@
-param([string]$Executable = (Join-Path $PSScriptRoot '../dist/MediaCategorizer4_5.exe'))
+param([string]$Executable = (Join-Path $PSScriptRoot '../dist/MediaCategorizer.exe'))
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -50,7 +50,7 @@ try {
             if ($errorWindow -ne [IntPtr]::Zero) {
                 throw 'The packaged application displayed an exception dialog.'
             }
-            $windowHandle = [MediaCategorizerSmokeWindow]::Find($candidateId, 'Media Categorizer 4.5')
+            $windowHandle = [MediaCategorizerSmokeWindow]::Find($candidateId, 'Media Categorizer')
             if ($windowHandle -ne [IntPtr]::Zero) {
                 $foundWindow = $windowHandle
                 break
@@ -60,7 +60,7 @@ try {
         Start-Sleep -Milliseconds 200
     }
     if (-not $foundWindow) { throw 'Application window was not found.' }
-    $title = 'Media Categorizer 4.5'
+    $title = 'Media Categorizer'
     $closed = [MediaCategorizerSmokeWindow]::PostMessage($foundWindow, 16, [IntPtr]::Zero, [IntPtr]::Zero)
     if (-not $started.WaitForExit(10000)) { throw 'Application did not exit after normal close.' }
     if ($started.ExitCode -ne 0) { throw "Application exited with code $($started.ExitCode)." }
@@ -77,7 +77,7 @@ finally {
     foreach ($ownedId in ($ownedIds | Sort-Object -Descending)) {
         $owned = Get-Process -Id $ownedId -ErrorAction SilentlyContinue
         if ($owned) {
-            foreach ($caption in @('Media Categorizer 4.5', 'Unhandled exception in script')) {
+            foreach ($caption in @('Media Categorizer', 'Unhandled exception in script')) {
                 $handle = [MediaCategorizerSmokeWindow]::Find($ownedId, $caption)
                 if ($handle -ne [IntPtr]::Zero) {
                     $null = [MediaCategorizerSmokeWindow]::PostMessage($handle, 16, [IntPtr]::Zero, [IntPtr]::Zero)

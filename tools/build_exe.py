@@ -18,7 +18,11 @@ def main():
     from PyInstaller.__main__ import run
     run([
         "--noconfirm", "--clean", "--onefile", "--windowed",
-        "--name", "MediaCategorizer4_5", "media_categorizer_v4_5.py",
+        "--name", "MediaCategorizer",
+        "--add-data", "media_categorizer/assets;media_categorizer/assets",
+        "--icon", "media_categorizer/assets/app.ico",
+        "--version-file", "installer/version.txt",
+        "media_categorizer_v4_5.py",
     ])
 
 

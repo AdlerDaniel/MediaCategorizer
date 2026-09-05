@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QProgressBar,
@@ -62,6 +63,8 @@ from media_categorizer.naming import safe_filename, sanitize_category, filter_du
 from media_categorizer.file_operations import FileReservations, perform_file_operation, rename_no_replace
 from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, VideoViewport
 
+
+from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon
 
 RESERVED_SHORTCUTS = {
     QKeySequence(Qt.Key_Right).toString(QKeySequence.PortableText),
@@ -886,6 +889,7 @@ class MediaCategorizer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QIcon(str(Path(__file__).parent / "media_categorizer/assets/app.ico")))
         self.resize(1400, 900)
 
         self.settings = load_settings()
@@ -919,6 +923,7 @@ class MediaCategorizer(QMainWindow):
         self.timeline_dragging = False
         self._native_frame_guard = False
 
+        apply_theme(self.settings.get("theme", "dark"))
         self._build_ui()
         self._load_toggle_settings()
         self.build_category_buttons()
@@ -937,56 +942,64 @@ class MediaCategorizer(QMainWindow):
         self.fullscreen_status_label.setAlignment(Qt.AlignCenter)
         self.fullscreen_status_label.hide()
 
-        self.open_folder_btn = QPushButton("Открыть папку")
-        self.last_folder_btn = QPushButton("Последняя папка")
-        self.open_file_btn = QPushButton("Открыть файл")
-        self.undo_btn = QPushButton("Отменить Ctrl+Z")
-        self.settings_btn = QPushButton("Категории / действия")
-        self.template_btn = QPushButton("Шаблон имени")
-        self.log_btn = QPushButton("Журнал")
-        self.duplicates_btn = QPushButton("Дубликаты")
-        self.fullscreen_btn = QPushButton("Полный экран F11")
-
+        brand = QLabel("Media Categorizer")
+        brand.setObjectName("brand")
+        self.open_folder_btn = IconButton("folder-open", "Открыть папку")
+        self.open_folder_btn.setProperty("primary", True)
+        self.last_folder_btn = IconButton("history", "Последняя папка", compact=True)
+        self.open_file_btn = IconButton("file-plus", "Открыть файл", compact=True)
+        self.undo_btn = IconButton("undo-2", "Отменить (Ctrl+Z)", compact=True)
+        self.settings_btn = IconButton("settings-2", "Категории и действия")
+        self.template_btn = IconButton("text-cursor-input", "Шаблон имени")
+        self.log_btn = IconButton("scroll-text", "Журнал операций")
+        self.duplicates_btn = IconButton("copy", "Поиск дубликатов")
+        self.fullscreen_btn = IconButton("maximize", "Полный экран (F11)", compact=True)
+        self.theme_btn = IconButton("sun", "Сменить тему", compact=True)
+        self.theme_btn.icon_name = "moon" if QApplication.instance().property("theme") == "light" else "sun"
+        self.theme_btn.refresh_icon()
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.menu_btn = IconButton("settings-2", "Настройки")
+        menu = QMenu(self.menu_btn)
+        for button, callback in ((self.settings_btn, self.edit_categories), (self.template_btn, self.edit_rename_template), (self.log_btn, self.show_log), (self.duplicates_btn, self.show_duplicates)):
+            action = menu.addAction(button.text())
+            action.triggered.connect(callback)
+            button.clicked.connect(callback)
+            button.setParent(self)
+            button.hide()
+        self.menu_btn.setMenu(menu)
         self.open_folder_btn.clicked.connect(self.open_folder)
         self.last_folder_btn.clicked.connect(self.open_last_folder)
         self.open_file_btn.clicked.connect(self.open_file)
         self.undo_btn.clicked.connect(self.undo_last_action)
-        self.settings_btn.clicked.connect(self.edit_categories)
-        self.template_btn.clicked.connect(self.edit_rename_template)
-        self.log_btn.clicked.connect(self.show_log)
-        self.duplicates_btn.clicked.connect(self.show_duplicates)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
-
         top_layout = QHBoxLayout()
-        for button in (
-            self.open_folder_btn, self.last_folder_btn, self.open_file_btn,
-            self.undo_btn, self.settings_btn, self.template_btn,
-            self.log_btn, self.duplicates_btn, self.fullscreen_btn,
-        ):
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.addWidget(brand)
+        top_layout.addSpacing(18)
+        for button in (self.open_folder_btn, self.last_folder_btn, self.open_file_btn, self.undo_btn):
             top_layout.addWidget(button)
         top_layout.addStretch()
         top_layout.addWidget(self.progress_label)
+        for button in (self.menu_btn, self.theme_btn, self.fullscreen_btn):
+            top_layout.addWidget(button)
         self.top_widget = QWidget()
         self.top_widget.setLayout(top_layout)
 
-        self.multi_btn = QPushButton()
-        self.multi_btn.setCheckable(True)
-        self.apply_tags_btn = QPushButton("Применить теги →")
-        self.loop_btn = QPushButton()
-        self.loop_btn.setCheckable(True)
-        self.sound_btn = QPushButton()
-        self.sound_btn.setCheckable(True)
-        self.rotate_left_btn = QPushButton("↺ Вид")
-        self.rotate_right_btn = QPushButton("↻ Вид")
-        self.thumbnail_toggle_btn = QPushButton("Миниатюры ▸")
+        self.multi_btn = ToggleSwitch("Несколько тегов")
+        self.apply_tags_btn = IconButton("check", "Применить теги")
+        self.apply_tags_btn.setProperty("primary", True)
+        self.loop_btn = ToggleSwitch("Повтор")
+        self.sound_btn = ToggleSwitch("Звук")
+        self.rotate_left_btn = IconButton("rotate-ccw", "Повернуть влево", compact=True)
+        self.rotate_right_btn = IconButton("rotate-cw", "Повернуть вправо", compact=True)
+        self.thumbnail_toggle_btn = IconButton("images", "Миниатюры", compact=True)
         self.thumbnail_toggle_btn.setCheckable(True)
-        self.properties_toggle_btn = QPushButton("Параметры ▸")
+        self.properties_toggle_btn = IconButton("info", "Параметры файла", compact=True)
         self.properties_toggle_btn.setCheckable(True)
-
-        self.zoom_out_btn = QPushButton("−")
-        self.zoom_in_btn = QPushButton("+")
+        self.zoom_out_btn = IconButton("minus", "Уменьшить (Ctrl+−)", compact=True)
+        self.zoom_in_btn = IconButton("plus", "Увеличить (Ctrl++)", compact=True)
         self.zoom_reset_btn = QPushButton("100%")
-        self.zoom_reset_btn.setToolTip("Сбросить масштаб: 100% = вписать в свободную область")
+        self.zoom_reset_btn.setToolTip("Вписать в окно (Ctrl+0)")
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setRange(25, 400)
         self.zoom_slider.setSingleStep(5)
@@ -1009,10 +1022,9 @@ class MediaCategorizer(QMainWindow):
         self.zoom_slider.valueChanged.connect(self.set_zoom_percent)
 
         tools_layout = QHBoxLayout()
+        tools_layout.setContentsMargins(0, 0, 0, 0)
         tools_layout.addWidget(self.multi_btn)
         tools_layout.addWidget(self.apply_tags_btn)
-        tools_layout.addWidget(self.loop_btn)
-        tools_layout.addWidget(self.sound_btn)
         tools_layout.addWidget(self.rotate_left_btn)
         tools_layout.addWidget(self.rotate_right_btn)
         tools_layout.addSpacing(8)
@@ -1024,7 +1036,7 @@ class MediaCategorizer(QMainWindow):
         tools_layout.addSpacing(8)
         tools_layout.addWidget(self.thumbnail_toggle_btn)
         tools_layout.addWidget(self.properties_toggle_btn)
-        tools_layout.addStretch()
+        tools_layout.insertStretch(2)
         self.tools_widget = QWidget()
         self.tools_widget.setLayout(tools_layout)
 
@@ -1066,12 +1078,8 @@ class MediaCategorizer(QMainWindow):
         self.media_stack.resized.connect(self._on_media_viewport_resized)
 
         # Large navigation arrows live immediately beside the viewed media.
-        self.left_nav_btn = QPushButton("❮")
-        self.right_nav_btn = QPushButton("❯")
-        for btn in (self.left_nav_btn, self.right_nav_btn):
-            btn.setFixedWidth(54)
-            btn.setMinimumHeight(160)
-            btn.setStyleSheet("font-size: 30px; font-weight: 600;")
+        self.left_nav_btn = IconButton("chevron-left", "Предыдущий файл (←)", compact=True)
+        self.right_nav_btn = IconButton("chevron-right", "Следующий файл (→)", compact=True)
         self.left_nav_btn.setToolTip("Предыдущий файл (←)")
         self.right_nav_btn.setToolTip("Следующий файл (→)")
         self.left_nav_btn.clicked.connect(self.previous_file)
@@ -1079,11 +1087,13 @@ class MediaCategorizer(QMainWindow):
 
         # Video transport controls: timeline and controls are centered directly
         # below the video instead of stretching from the left edge of the window.
-        self.play_btn = QPushButton("▶")
-        self.minus5_btn = QPushButton("−5 с")
-        self.plus5_btn = QPushButton("+5 с")
-        self.frame_back_btn = QPushButton("◀ кадр")
-        self.frame_next_btn = QPushButton("кадр ▶")
+        self.play_btn = IconButton("play", "Воспроизвести (Пробел)", compact=True)
+        self.play_btn.setProperty("primary", True)
+        self.play_btn.setFixedSize(46, 46)
+        self.minus5_btn = IconButton("rotate-ccw", "−5 с")
+        self.plus5_btn = IconButton("rotate-cw", "+5 с")
+        self.frame_back_btn = IconButton("step-back", "Предыдущий кадр (Alt+←)", compact=True)
+        self.frame_next_btn = IconButton("step-forward", "Следующий кадр (Alt+→)", compact=True)
         self.timeline = QSlider(Qt.Horizontal)
         self.timeline.setRange(0, 1000)
         self.timeline.setMinimumWidth(360)
@@ -1120,6 +1130,8 @@ class MediaCategorizer(QMainWindow):
         transport_row.addSpacing(8)
         transport_row.addWidget(self.speed_combo)
         transport_row.addStretch()
+        transport_row.addWidget(self.loop_btn)
+        transport_row.addWidget(self.sound_btn)
 
         video_controls_layout = QVBoxLayout()
         video_controls_layout.setContentsMargins(0, 2, 0, 2)
@@ -1225,7 +1237,7 @@ class MediaCategorizer(QMainWindow):
 
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(6)
         layout.addWidget(self.top_widget)
         layout.addWidget(self.tools_widget)
@@ -1235,7 +1247,16 @@ class MediaCategorizer(QMainWindow):
         layout.addWidget(self.tag_preview_label)
         layout.addWidget(self.thumbnail_list)
         layout.addWidget(self.scroll)
+        layout.addWidget(self.background_widget)
         self.setCentralWidget(central)
+
+    def toggle_theme(self):
+        theme = "light" if QApplication.instance().property("theme") == "dark" else "dark"
+        self.settings["theme"] = theme
+        apply_theme(theme)
+        self.theme_btn.icon_name = "moon" if theme == "light" else "sun"
+        self.theme_btn.refresh_icon()
+        self._persist_settings()
 
     def _load_toggle_settings(self):
         self.multi_btn.setChecked(bool(self.settings.get("multi_tag_mode", False)))
@@ -1329,9 +1350,9 @@ class MediaCategorizer(QMainWindow):
         self.show_current_file()
 
     def _refresh_toggle_labels(self):
-        self.multi_btn.setText("Несколько тегов: вкл" if self.multi_btn.isChecked() else "Несколько тегов: выкл")
-        self.loop_btn.setText("Повтор: вкл" if self.loop_btn.isChecked() else "Повтор: выкл")
-        self.sound_btn.setText("Звук: вкл" if self.sound_btn.isChecked() else "Звук: выкл")
+        self.multi_btn.setText("Несколько тегов")
+        self.loop_btn.setText("Повтор")
+        self.sound_btn.setText("Звук")
 
     def _update_last_folder_button(self):
         last = str(self.settings.get("last_folder", ""))
@@ -1412,14 +1433,14 @@ class MediaCategorizer(QMainWindow):
         QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def set_thumbnail_ribbon_visible(self, enabled):
-        self.thumbnail_toggle_btn.setText("Миниатюры ▾" if enabled else "Миниатюры ▸")
+
         self.thumbnail_list.setVisible(bool(enabled))
         if enabled:
             self.refresh_thumbnail_ribbon()
         QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def set_properties_visible(self, enabled):
-        self.properties_toggle_btn.setText("Параметры ▾" if enabled else "Параметры ▸")
+
         self.properties_group.setVisible(bool(enabled))
         if enabled:
             self.update_file_properties()
@@ -1471,7 +1492,7 @@ class MediaCategorizer(QMainWindow):
             text = name
             if shortcut:
                 text += f"  [{shortcut}]"
-            button = QPushButton(text)
+            button = IconButton("tags", text)
             button.setToolTip(action_label + (f" → {item.get('destination')}" if item.get("destination") else ""))
             button.setMinimumHeight(56)
             button.setCheckable(self.multi_btn.isChecked())
@@ -2119,7 +2140,7 @@ class MediaCategorizer(QMainWindow):
     def _on_playback_state_changed(self, index, state):
         if index != self.active_video_slot:
             return
-        self.play_btn.setText("⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶")
+        self.play_btn.set_playing(state == QMediaPlayer.PlaybackState.PlayingState)
 
     def _on_media_error(self, index, error, error_string):
         slot = self.video_slots[index]
@@ -2187,7 +2208,7 @@ class MediaCategorizer(QMainWindow):
         self.timeline.setValue(0)
         self.timeline.blockSignals(False)
         self.time_label.setText("00:00 / 00:00")
-        self.play_btn.setText("▶")
+        self.play_btn.set_playing(False)
 
 
     def _metadata_value(self, metadata, key_name):
@@ -2508,6 +2529,7 @@ class MediaCategorizer(QMainWindow):
         self._start_next_file_operation()
 
     def update_background_queue_ui(self):
+        self.background_widget.setVisible(bool(self.active_file_operation or self.file_operation_queue))
         queued = len(self.file_operation_queue)
         if self.active_file_operation:
             name = self.active_file_operation["source"].name
@@ -2804,6 +2826,11 @@ class MediaCategorizer(QMainWindow):
 
 
 if __name__ == "__main__":
+    # Keep a named mutex open so setup/update cannot replace a running app.
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.kernel32.CreateMutexW.restype = ctypes.c_void_p
+        _install_guard = ctypes.windll.kernel32.CreateMutexW(None, False, "MediaCategorizer.Running")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     window = MediaCategorizer()
