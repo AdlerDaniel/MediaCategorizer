@@ -1,15 +1,13 @@
 import csv
 import hashlib
 import json
-import os
-import shutil
 import sys
 import uuid
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QRect, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QIcon,
@@ -21,7 +19,6 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink, QtVideo
-from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -53,53 +50,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-APP_NAME = "Media Categorizer 4.5"
-APP_FOLDER = "MediaCategorizer"
+from media_categorizer.constants import (
+    APP_NAME, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, SUPPORTED_EXTENSIONS,
+    ACTION_LABELS, ACTIONS_WITH_DESTINATION, ACTIONS_WITH_RENAME,
+    DEFAULT_TEMPLATE, TEMPLATE_PRESETS, IMAGE_PRELOAD_FORWARD, IMAGE_PRELOAD_BACKWARD,
+    IMAGE_CACHE_MAX_ITEMS, IMAGE_CACHE_MAX_BYTES, VIDEO_SLOT_COUNT,
+    VIDEO_PRELOAD_COUNT, VIDEO_SCAN_AHEAD,
+)
+from media_categorizer.settings import load_settings, save_settings, log_path, normalize_categories
+from media_categorizer.naming import safe_filename, sanitize_category, filter_duplicate_tags, render_rename
+from media_categorizer.file_operations import FileReservations, perform_file_operation, rename_no_replace
+from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, VideoViewport
 
-IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tif", ".tiff"
-}
-VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".mkv", ".avi", ".wmv", ".m4v", ".webm", ".mpeg", ".mpg"
-}
-SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
-
-ACTION_LABELS = OrderedDict([
-    ("rename", "Переименовать"),
-    ("move", "Переместить"),
-    ("copy", "Скопировать"),
-    ("rename_move", "Переименовать + переместить"),
-    ("rename_copy", "Переименовать + скопировать"),
-])
-ACTIONS_WITH_DESTINATION = {"move", "copy", "rename_move", "rename_copy"}
-ACTIONS_WITH_RENAME = {"rename", "rename_move", "rename_copy"}
-
-DEFAULT_CATEGORIES = [
-    {"name": "GOOD", "shortcut": "1", "action": "rename", "destination": ""},
-    {"name": "BAD", "shortcut": "2", "action": "rename", "destination": ""},
-    {"name": "EDIT", "shortcut": "3", "action": "rename", "destination": ""},
-    {"name": "POST", "shortcut": "4", "action": "rename", "destination": ""},
-]
-
-DEFAULT_TEMPLATE = "{tags}_{original}"
-TEMPLATE_PRESETS = [
-    "{tags}_{original}",
-    "{tags}_{stem}{ext}",
-    "{date}_{tags}_{original}",
-    "{tags}_{index}_{original}",
-    "{category}_{stem}{ext}",
-]
-
-# Image preloading is asynchronous. The cache is capped both by count and memory.
-IMAGE_PRELOAD_FORWARD = 5
-IMAGE_PRELOAD_BACKWARD = 2
-IMAGE_CACHE_MAX_ITEMS = 12
-IMAGE_CACHE_MAX_BYTES = 512 * 1024 * 1024
-
-# Three video decoders: one active + up to two upcoming videos pre-decoded to first frame.
-VIDEO_SLOT_COUNT = 2
-VIDEO_PRELOAD_COUNT = 1
-VIDEO_SCAN_AHEAD = 8
 
 RESERVED_SHORTCUTS = {
     QKeySequence(Qt.Key_Right).toString(QKeySequence.PortableText),
@@ -119,121 +81,6 @@ RESERVED_SHORTCUTS = {
     QKeySequence("Ctrl+-").toString(QKeySequence.PortableText),
     QKeySequence("Ctrl+0").toString(QKeySequence.PortableText),
 }
-
-
-def app_config_dir() -> Path:
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home()))
-    else:
-        base = Path.home() / ".config"
-    folder = base / APP_FOLDER
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
-def settings_path() -> Path:
-    return app_config_dir() / "settings_v4.json"
-
-
-def v3_settings_path() -> Path:
-    return app_config_dir() / "settings_v3.json"
-
-
-def v2_settings_path() -> Path:
-    return app_config_dir() / "settings_v2.json"
-
-
-def log_path() -> Path:
-    return app_config_dir() / "processing_log_v4.jsonl"
-
-
-def normalize_categories(data):
-    result = []
-    if isinstance(data, list):
-        for index, item in enumerate(data):
-            if isinstance(item, str):
-                name = item.strip()
-                shortcut = str(index + 1) if index < 9 else ""
-                action = "rename"
-                destination = ""
-            elif isinstance(item, dict):
-                name = str(item.get("name", "")).strip()
-                shortcut = str(item.get("shortcut", "")).strip()
-                action = str(item.get("action", "rename")).strip()
-                destination = str(item.get("destination", "")).strip()
-            else:
-                continue
-
-            if not name:
-                continue
-            if action not in ACTION_LABELS:
-                action = "rename"
-            shortcut = QKeySequence(shortcut).toString(QKeySequence.PortableText)
-            result.append({
-                "name": name,
-                "shortcut": shortcut,
-                "action": action,
-                "destination": destination,
-            })
-    return result or [dict(x) for x in DEFAULT_CATEGORIES]
-
-
-def load_settings():
-    defaults = {
-        "categories": [dict(x) for x in DEFAULT_CATEGORIES],
-        "last_folder": "",
-        "multi_tag_mode": False,
-        "loop_video": True,
-        "muted": False,
-        "playback_rate": 1.0,
-        "rename_template": DEFAULT_TEMPLATE,
-        "window_maximized": True,
-    }
-
-    path = settings_path()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                defaults.update(data)
-                defaults["categories"] = normalize_categories(defaults.get("categories"))
-                return defaults
-        except Exception:
-            pass
-
-    # Migrate useful settings from V3 automatically.
-    old3 = v3_settings_path()
-    if old3.exists():
-        try:
-            data = json.loads(old3.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                defaults.update(data)
-                defaults["categories"] = normalize_categories(defaults.get("categories"))
-                return defaults
-        except Exception:
-            pass
-
-    # Migrate useful settings from V2 automatically.
-    old = v2_settings_path()
-    if old.exists():
-        try:
-            data = json.loads(old.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                for key in ("last_folder", "multi_tag_mode", "loop_video", "muted"):
-                    if key in data:
-                        defaults[key] = data[key]
-                defaults["categories"] = normalize_categories(data.get("categories"))
-        except Exception:
-            pass
-
-    return defaults
-
-
-def save_settings(data):
-    settings_path().write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
 
 def read_oriented_image(path: Path) -> QImage:
@@ -347,26 +194,6 @@ def format_millis(ms: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
-def safe_filename(name: str) -> str:
-    forbidden = '<>:"/\\|?*'
-    cleaned = "".join("_" if ch in forbidden else ch for ch in name)
-    cleaned = cleaned.strip().rstrip(". ")
-    return cleaned or "media"
-
-
-def unique_destination(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    number = 1
-    while True:
-        candidate = path.with_name(f"{stem} ({number}){suffix}")
-        if not candidate.exists():
-            return candidate
-        number += 1
-
-
 def human_size(value: int) -> str:
     value = max(0, int(value or 0))
     units = ["Б", "КБ", "МБ", "ГБ", "ТБ"]
@@ -428,191 +255,6 @@ class ImageLoadTask(QRunnable):
     def run(self):
         image = read_oriented_image(self.path) if self.path.exists() else QImage()
         self.signals.loaded.emit(str(self.path), image)
-
-
-class MediaViewport(QWidget):
-    """Clipping viewport for photo/video display.
-
-    At 100% the current media is fitted to the entire free viewer area while
-    preserving its aspect ratio. Values above 100% enlarge from that fitted
-    size and are clipped by this viewport instead of forcing the surrounding
-    toolbars/panels to move.
-    """
-
-    resized = Signal()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.resized.emit()
-
-
-class ImageCanvas(QWidget):
-    """Photo viewport that always uses the whole free viewer area.
-
-    100% means fit the complete image to the current canvas, edge-to-edge on
-    the limiting axis while preserving aspect ratio. Zoom above 100% grows
-    from that fitted size and is clipped by the canvas; surrounding controls
-    never move or shrink the media area.
-    """
-
-    def __init__(self, message="", parent=None):
-        super().__init__(parent)
-        self._image = QImage()
-        self._message = str(message or "")
-        self._zoom_percent = 100
-        self.setMinimumSize(1, 1)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-    def clear(self):
-        self._image = QImage()
-        self._message = ""
-        self.update()
-
-    def setText(self, text):
-        self._message = str(text or "")
-        self._image = QImage()
-        self.update()
-
-    def text(self):
-        return self._message
-
-    def set_image(self, image: QImage):
-        self._image = QImage(image) if image is not None and not image.isNull() else QImage()
-        if not self._image.isNull():
-            self._message = ""
-        self.update()
-
-    def set_zoom_percent(self, percent):
-        self._zoom_percent = max(25, min(400, int(percent)))
-        self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
-        if self._image.isNull():
-            if self._message:
-                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
-            painter.end()
-            return
-
-        area = self.contentsRect()
-        aw = max(1, area.width())
-        ah = max(1, area.height())
-        sw = max(1, self._image.width())
-        sh = max(1, self._image.height())
-
-        # Base size for 100%: the largest complete image that fits in every
-        # available pixel of the viewer. This intentionally does NOT use the
-        # source's physical pixel size, so a small image is enlarged too.
-        fit = min(aw / sw, ah / sh)
-        factor = fit * max(0.25, min(4.0, self._zoom_percent / 100.0))
-        tw = max(1, int(round(sw * factor)))
-        th = max(1, int(round(sh * factor)))
-        x = area.x() + int(round((aw - tw) / 2))
-        y = area.y() + int(round((ah - th) / 2))
-
-        target = QRect(x, y, tw, th)
-        painter.drawImage(target, self._image)
-        painter.end()
-
-
-class VideoCanvas(QVideoWidget):
-    """Native Qt video surface with adaptive geometry.
-
-    QVideoWidget keeps the decoded frame in Qt's video pipeline instead of
-    converting every 4K/60fps frame to QImage in Python.  This is the main
-    playback-performance change in V4.2.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._source_size = QSize(16, 9)
-        self._auto_rotation = 0
-        self._manual_rotation = 0
-        self._zoom_percent = 100
-        self.setMinimumSize(1, 1)
-        self.setAspectRatioMode(Qt.KeepAspectRatio)
-
-    @property
-    def manual_rotation(self):
-        return self._manual_rotation
-
-    def clear(self):
-        self._source_size = QSize(16, 9)
-        self._auto_rotation = 0
-        self._manual_rotation = 0
-        try:
-            self.videoSink().setVideoFrame(QVideoFrame())
-        except Exception:
-            pass
-        self.updateGeometry()
-        self.update()
-
-    def set_video_geometry(self, size: QSize, auto_rotation=0):
-        changed = False
-        if size is not None and size.isValid() and size.width() > 0 and size.height() > 0:
-            new_size = QSize(size)
-            if new_size != self._source_size:
-                self._source_size = new_size
-                changed = True
-        new_rotation = int(auto_rotation or 0) % 360
-        if new_rotation != self._auto_rotation:
-            self._auto_rotation = new_rotation
-            changed = True
-        # Do not trigger a QWidget layout pass for every 30/60 fps frame.
-        if changed:
-            self.fit_to_parent()
-
-    def rotate_view(self, degrees):
-        self._manual_rotation = (self._manual_rotation + int(degrees)) % 360
-        self.fit_to_parent()
-        return self._manual_rotation
-
-    def reset_manual_rotation(self):
-        self._manual_rotation = 0
-        self.fit_to_parent()
-
-    def set_zoom_percent(self, percent):
-        self._zoom_percent = max(25, min(400, int(percent)))
-        self.fit_to_parent()
-
-    def effective_rotation(self):
-        return (self._auto_rotation + self._manual_rotation) % 360
-
-    def _effective_size(self):
-        width = max(1, self._source_size.width())
-        height = max(1, self._source_size.height())
-        if self.effective_rotation() % 180:
-            width, height = height, width
-        return QSize(width, height)
-
-    def fit_to_parent(self):
-        parent = self.parentWidget()
-        if parent is None:
-            return
-        available = parent.contentsRect().size()
-        if available.width() <= 1 or available.height() <= 1:
-            return
-
-        source = self._effective_size()
-        ratio = max(1, source.width()) / max(1, source.height())
-
-        # 100% means "fit to all currently available viewer space". Zooming
-        # is relative to that fitted size, not to the media's physical pixels.
-        base_width = available.width()
-        base_height = int(round(base_width / ratio))
-        if base_height > available.height():
-            base_height = available.height()
-            base_width = int(round(base_height * ratio))
-
-        factor = max(0.25, min(4.0, self._zoom_percent / 100.0))
-        width = max(1, int(round(base_width * factor)))
-        height = max(1, int(round(base_height * factor)))
-        x = int(round((available.width() - width) / 2))
-        y = int(round((available.height() - height) / 2))
-        self.setGeometry(x, y, width, height)
 
 
 class DestinationEditor(QWidget):
@@ -994,7 +636,7 @@ class ThumbnailTask(QRunnable):
 
 
 class FileOperationSignals(QObject):
-    progress = Signal(str, int, int)
+    progress = Signal(str, object, object)
     finished = Signal(str, bool, str, str)
 
 
@@ -1007,55 +649,16 @@ class FileOperationTask(QRunnable):
         self.target = Path(target)
         self.signals = FileOperationSignals()
 
-    def _copy_with_progress(self):
-        total = max(0, self.source.stat().st_size)
-        copied = 0
-        self.target.parent.mkdir(parents=True, exist_ok=True)
-        with self.source.open("rb") as src, self.target.open("wb") as dst:
-            while True:
-                chunk = src.read(16 * 1024 * 1024)
-                if not chunk:
-                    break
-                dst.write(chunk)
-                copied += len(chunk)
-                self.signals.progress.emit(self.op_id, copied, total)
-        shutil.copystat(self.source, self.target, follow_symlinks=True)
-        self.signals.progress.emit(self.op_id, total, total)
-
     def run(self):
         try:
-            if not self.source.exists():
-                raise FileNotFoundError(f"Исходный файл не найден: {self.source}")
-            self.target.parent.mkdir(parents=True, exist_ok=True)
-            if self.target.exists():
-                raise FileExistsError(f"Файл назначения уже существует: {self.target}")
-
-            if self.kind == "copy":
-                self._copy_with_progress()
-            elif self.kind == "move":
-                same_device = False
-                try:
-                    same_device = self.source.stat().st_dev == self.target.parent.stat().st_dev
-                except Exception:
-                    pass
-                if same_device:
-                    os.replace(self.source, self.target)
-                    total = max(0, self.target.stat().st_size)
-                    self.signals.progress.emit(self.op_id, total, total)
-                else:
-                    self._copy_with_progress()
-                    self.source.unlink()
-            else:
-                raise ValueError(f"Неизвестная операция: {self.kind}")
-            self.signals.finished.emit(self.op_id, True, str(self.target), "")
+            perform_file_operation(
+                self.kind, self.source, self.target,
+                lambda copied, total: self.signals.progress.emit(self.op_id, copied, total),
+            )
         except Exception as exc:
-            # Remove a partially copied destination when it is safe to do so.
-            try:
-                if self.kind in {"copy", "move"} and self.target.exists() and self.source.exists():
-                    self.target.unlink()
-            except Exception:
-                pass
             self.signals.finished.emit(self.op_id, False, str(self.target), str(exc))
+        else:
+            self.signals.finished.emit(self.op_id, True, str(self.target), "")
 
 
 class DuplicateScanSignals(QObject):
@@ -1303,7 +906,7 @@ class MediaCategorizer(QMainWindow):
         # Background copy/move queue: one active disk-heavy operation at a time.
         self.file_operation_queue = []
         self.active_file_operation = None
-        self.reserved_targets = set()
+        self.file_reservations = FileReservations()
 
         self.image_cache = OrderedDict()
         self.image_cache_bytes = 0
@@ -1324,7 +927,7 @@ class MediaCategorizer(QMainWindow):
         self.update_controls()
 
         if bool(self.settings.get("window_maximized", True)):
-            QTimer.singleShot(0, self.showMaximized)
+            QTimer.singleShot(0, self, self.showMaximized)
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -1446,11 +1049,13 @@ class MediaCategorizer(QMainWindow):
         # Video keeps a dedicated expanding host because VideoCanvas changes its
         # own geometry for zoom/cropping. The host itself is what the stacked
         # layout stretches to the full free viewer area.
-        self.video_host = MediaViewport()
+        self.video_host = VideoViewport()
         self.video_host.setMinimumSize(1, 1)
         self.video_host.setContentsMargins(0, 0, 0, 0)
         self.video_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video_canvas = VideoCanvas(self.video_host)
+        self.video_canvas = VideoCanvas(self.video_host.viewport())
+        self.image_label.zoomChanged.connect(self.set_zoom_percent)
+        self.video_canvas.zoomChanged.connect(self.set_zoom_percent)
         self.video_canvas.videoSink().videoFrameChanged.connect(self._on_active_native_video_frame)
         self.video_host.resized.connect(self.video_canvas.fit_to_parent)
 
@@ -1792,7 +1397,7 @@ class MediaCategorizer(QMainWindow):
             self.tag_preview_label.hide()
             self.fullscreen_status_label.show()
             self.showFullScreen()
-            QTimer.singleShot(0, self._on_media_viewport_resized)
+            QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def exit_fullscreen(self):
         if not self.fullscreen_mode:
@@ -1804,21 +1409,21 @@ class MediaCategorizer(QMainWindow):
         self.tag_preview_label.show()
         self.fullscreen_status_label.hide()
         self.showMaximized()
-        QTimer.singleShot(0, self._on_media_viewport_resized)
+        QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def set_thumbnail_ribbon_visible(self, enabled):
         self.thumbnail_toggle_btn.setText("Миниатюры ▾" if enabled else "Миниатюры ▸")
         self.thumbnail_list.setVisible(bool(enabled))
         if enabled:
             self.refresh_thumbnail_ribbon()
-        QTimer.singleShot(0, self._on_media_viewport_resized)
+        QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def set_properties_visible(self, enabled):
         self.properties_toggle_btn.setText("Параметры ▾" if enabled else "Параметры ▸")
         self.properties_group.setVisible(bool(enabled))
         if enabled:
             self.update_file_properties()
-        QTimer.singleShot(0, self._on_media_viewport_resized)
+        QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     # ---------- Zoom ----------
     def set_zoom_percent(self, value):
@@ -1848,7 +1453,7 @@ class MediaCategorizer(QMainWindow):
         elif self.current_file and self.current_file.suffix.lower() in VIDEO_EXTENSIONS:
             # The dedicated video host is expanded by QStackedLayout first.
             # Queue the fit one event-loop turn later so it uses final geometry.
-            QTimer.singleShot(0, self.video_canvas.fit_to_parent)
+            QTimer.singleShot(0, self, self.video_canvas.fit_to_parent)
 
     # ---------- Categories ----------
     def build_category_buttons(self):
@@ -1957,7 +1562,7 @@ class MediaCategorizer(QMainWindow):
 
     # ---------- Files ----------
     def sanitize_category(self, category):
-        return safe_filename(str(category)).strip("_")
+        return sanitize_category(category)
 
     def _folder_dialog_start(self):
         last = str(self.settings.get("last_folder", ""))
@@ -2663,6 +2268,8 @@ class MediaCategorizer(QMainWindow):
     # ---------- Display ----------
     def show_current_file(self):
         self.clear_selected_tags()
+        self.image_label.reset_pan()
+        self.video_canvas.reset_pan()
         self.video_canvas.reset_manual_rotation()
 
         while self.files and 0 <= self.current_index < len(self.files):
@@ -2752,9 +2359,9 @@ class MediaCategorizer(QMainWindow):
         self.refresh_thumbnail_ribbon()
         self.update_file_properties()
         self.update_controls()
-        QTimer.singleShot(0, self._on_media_viewport_resized)
-        QTimer.singleShot(0, self._preload_window)
-        QTimer.singleShot(900, self._preload_video_window)
+        QTimer.singleShot(0, self, self._on_media_viewport_resized)
+        QTimer.singleShot(0, self, self._preload_window)
+        QTimer.singleShot(900, self, self._preload_video_window)
 
     def _display_current_image(self):
         if self.current_image.isNull():
@@ -2767,7 +2374,7 @@ class MediaCategorizer(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._on_media_viewport_resized)
+        QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def rotate_current_view(self, degrees):
         if not self.current_file:
@@ -2809,13 +2416,13 @@ class MediaCategorizer(QMainWindow):
     # ---------- Background copy/move queue ----------
     def _unique_reserved_destination(self, target: Path) -> Path:
         target = Path(target)
-        if not target.exists() and str(target).casefold() not in self.reserved_targets:
+        if not target.exists() and not self.file_reservations.is_busy(target):
             return target
         stem, suffix = target.stem, target.suffix
         number = 1
         while True:
             candidate = target.with_name(f"{stem} ({number}){suffix}")
-            if not candidate.exists() and str(candidate).casefold() not in self.reserved_targets:
+            if not candidate.exists() and not self.file_reservations.is_busy(candidate):
                 return candidate
             number += 1
 
@@ -2831,7 +2438,7 @@ class MediaCategorizer(QMainWindow):
             "index": int(index),
             "remove_from_list": bool(remove_from_list),
         }
-        self.reserved_targets.add(str(target).casefold())
+        self.file_reservations.acquire(op_id, source, target)
         self.file_operation_queue.append(info)
         self.append_log("QUEUE", source, target, "QUEUED", action_label)
         self.update_background_queue_ui()
@@ -2851,7 +2458,12 @@ class MediaCategorizer(QMainWindow):
         self.background_progress.setRange(0, 100)
         self.background_progress.setValue(0)
         self.update_background_queue_ui()
-        self.thread_pool.start(task)
+        try:
+            self.thread_pool.start(task)
+        except Exception as exc:
+            # Defer completion until the caller has updated its file list.
+            QTimer.singleShot(0, self, lambda op=info["id"], target=str(info["target"]), error=str(exc):
+                              self._on_file_operation_finished(op, False, target, error))
 
     def _on_file_operation_progress(self, op_id, copied, total):
         if not self.active_file_operation or self.active_file_operation["id"] != op_id:
@@ -2868,7 +2480,7 @@ class MediaCategorizer(QMainWindow):
             return
         source = info["source"]
         target = Path(result_path)
-        self.reserved_targets.discard(str(info["target"]).casefold())
+        self.file_reservations.release(op_id)
 
         if success:
             self.append_log(info["action_label"], source, target, "OK", "Фоновая операция завершена")
@@ -2908,70 +2520,11 @@ class MediaCategorizer(QMainWindow):
             self.background_progress.setValue(0)
 
     # ---------- Rename/action logic ----------
-    def leading_category_prefixes(self, path: Path):
-        remainder = path.stem
-        found = []
-        category_prefixes = []
-        for item in self.categories:
-            clean = self.sanitize_category(item["name"])
-            if clean:
-                category_prefixes.append((clean, clean.casefold()))
-        category_prefixes.sort(key=lambda pair: len(pair[0]), reverse=True)
-
-        while remainder:
-            matched = False
-            lower = remainder.casefold()
-            for original, folded in category_prefixes:
-                if lower == folded:
-                    found.append(folded)
-                    remainder = ""
-                    matched = True
-                    break
-                prefix = folded + "_"
-                if lower.startswith(prefix):
-                    found.append(folded)
-                    remainder = remainder[len(original) + 1:]
-                    matched = True
-                    break
-            if not matched:
-                break
-        return set(found)
-
     def filter_duplicate_tags(self, path: Path, tags):
-        existing = self.leading_category_prefixes(path)
-        result = []
-        skipped = []
-        for tag in tags:
-            clean = self.sanitize_category(tag)
-            if not clean:
-                continue
-            if clean.casefold() in existing:
-                skipped.append(clean)
-            elif clean.casefold() not in {x.casefold() for x in result}:
-                result.append(clean)
-        return result, skipped
+        return filter_duplicate_tags(path, tags, self.categories)
 
     def render_rename(self, path: Path, tags, index):
-        tags_clean = [self.sanitize_category(x) for x in tags if self.sanitize_category(x)]
-        values = {
-            "tags": "_".join(tags_clean),
-            "category": tags_clean[0] if tags_clean else "",
-            "original": path.name,
-            "stem": path.stem,
-            "ext": path.suffix,
-            "index": f"{index + 1:04d}",
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "time": datetime.now().strftime("%H-%M-%S"),
-        }
-        template = str(self.settings.get("rename_template", DEFAULT_TEMPLATE) or DEFAULT_TEMPLATE)
-        try:
-            candidate = template.format(**values)
-        except Exception:
-            candidate = DEFAULT_TEMPLATE.format(**values)
-        candidate = safe_filename(candidate)
-        if path.suffix and not candidate.casefold().endswith(path.suffix.casefold()):
-            candidate += path.suffix
-        return candidate
+        return render_rename(path, tags, index, self.settings.get("rename_template", DEFAULT_TEMPLATE))
 
     def _effective_action(self, category_names):
         configs = [self.category_config(name) for name in category_names]
@@ -2989,6 +2542,8 @@ class MediaCategorizer(QMainWindow):
 
     def process_categories(self, category_names):
         if not self.current_file or not self.current_file.exists():
+            return
+        if self._warn_if_busy(self.current_file):
             return
 
         action_config = self._effective_action(category_names)
@@ -3041,12 +2596,15 @@ class MediaCategorizer(QMainWindow):
                     self.current_index += 1
                     self.show_current_file()
                     return
+                if self._warn_if_busy(target):
+                    self.show_current_file()
+                    return
                 if target.exists():
                     QMessageBox.warning(self, APP_NAME, f"Файл уже существует:\n{target.name}")
                     self.append_log("RENAME", old_path, target, "ERROR", "Имя уже занято")
                     self.show_current_file()
                     return
-                old_path.rename(target)
+                rename_no_replace(old_path, target)
                 self.undo_stack.append({"kind": "rename", "source": old_path, "result": target, "index": self.current_index})
                 self.files[self.current_index] = target
                 self._rename_cache_key(old_path, target)
@@ -3136,6 +2694,8 @@ class MediaCategorizer(QMainWindow):
         source = Path(action["source"])
         result = Path(action["result"])
         index = int(action.get("index", 0))
+        if self._warn_if_busy(source, result):
+            return
         self.stop_all_video()
 
         try:
@@ -3144,7 +2704,7 @@ class MediaCategorizer(QMainWindow):
                     raise FileNotFoundError(f"Не найден файл: {result}")
                 if source.exists():
                     raise FileExistsError(f"Исходное имя уже занято: {source}")
-                result.rename(source)
+                rename_no_replace(result, source)
                 try:
                     list_index = self.files.index(result)
                     self.files[list_index] = source
@@ -3161,7 +2721,7 @@ class MediaCategorizer(QMainWindow):
                 if source.exists():
                     raise FileExistsError(f"Исходный путь уже занят: {source}")
                 source.parent.mkdir(parents=True, exist_ok=True)
-                restored = Path(shutil.move(str(result), str(source)))
+                restored = perform_file_operation("move", result, source)
                 insert_at = max(0, min(index, len(self.files)))
                 self.files.insert(insert_at, restored)
                 self.current_index = insert_at
@@ -3197,13 +2757,31 @@ class MediaCategorizer(QMainWindow):
         self.current_index = max(0, self.current_index - 1)
         self.show_current_file()
 
+    def _warn_if_busy(self, *paths):
+        if not self.file_reservations.is_busy(*paths):
+            return False
+        QMessageBox.information(self, APP_NAME,
+                                "Файл занят копированием/перемещением. Дождитесь завершения операции.")
+        return True
+
+    def _can_undo(self):
+        if not self.undo_stack:
+            return False
+        action = self.undo_stack[-1]
+        return not self.file_reservations.is_busy(action["source"], action["result"])
+
     def update_controls(self):
         has_current = bool(self.current_file and self.current_file.exists())
         self.left_nav_btn.setEnabled(bool(self.files and self.current_index > 0))
         self.right_nav_btn.setEnabled(bool(self.files and has_current and self.current_index < len(self.files) - 1))
-        self.undo_btn.setEnabled(bool(self.undo_stack))
+        self.undo_btn.setEnabled(self._can_undo())
+        busy = has_current and self.file_reservations.is_busy(self.current_file)
+        for button in self.category_buttons.values():
+            button.setEnabled(has_current and not busy)
+        self.undo_btn.setToolTip("Дождитесь завершения операции с этим файлом"
+                                 if self.undo_stack and not self._can_undo() else "Отменить последнее завершённое действие")
         self.apply_tags_btn.setVisible(self.multi_btn.isChecked())
-        self.apply_tags_btn.setEnabled(self.multi_btn.isChecked() and has_current and bool(self.selected_tags))
+        self.apply_tags_btn.setEnabled(self.multi_btn.isChecked() and has_current and not busy and bool(self.selected_tags))
         self.rotate_left_btn.setEnabled(has_current)
         self.rotate_right_btn.setEnabled(has_current)
         is_video = has_current and self.current_file.suffix.lower() in VIDEO_EXTENSIONS
