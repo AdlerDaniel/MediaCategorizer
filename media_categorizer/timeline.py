@@ -118,7 +118,12 @@ class RangeTimeline(QWidget):
             for index, image in enumerate(self.images):
                 painter.drawImage(QRectF(area.x()+index*width, 8, width, 64), image)
         if not self.waveform.isNull():
-            painter.drawImage(QRectF(12, 74, area.width(), 52), self.waveform)
+            wave = self.waveform.copy()
+            tint = QPainter(wave)
+            tint.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            tint.fillRect(wave.rect(), QColor(c['accent']))
+            tint.end()
+            painter.drawImage(QRectF(12, 74, area.width(), 52), wave)
         left, right = self.x(self.start), self.x(self.end)
         painter.fillRect(QRectF(12,8,max(0,left-12),120), QColor(0,0,0,145))
         painter.fillRect(QRectF(right,8,max(0,self.width()-12-right),120), QColor(0,0,0,145))

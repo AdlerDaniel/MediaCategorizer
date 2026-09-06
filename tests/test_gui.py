@@ -89,7 +89,7 @@ class WindowTests(unittest.TestCase):
     def test_theme_round_trip_preserves_categories(self):
         from media_categorizer.settings import load_settings
         original = self.app.palette().window().color()
-        self.window.theme_btn.click()
+        self.window.theme_actions["light"].trigger()
         self.assertNotEqual(original, self.app.palette().window().color())
         saved = load_settings()
         self.assertEqual(saved['theme'], 'light')
@@ -99,7 +99,7 @@ class WindowTests(unittest.TestCase):
         try:
             self.assertEqual(self.app.property('theme'), 'light')
             self.assertEqual(other.theme_btn.icon_name, 'moon')
-            other.theme_btn.click()
+            other.theme_actions["dark"].trigger()
             self.assertEqual(load_settings()['theme'], 'dark')
         finally:
             other.close()

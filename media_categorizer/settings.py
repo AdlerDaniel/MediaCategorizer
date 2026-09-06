@@ -63,7 +63,9 @@ def normalize_categories(data):
             if isinstance(item, dict):
                 from PySide6.QtGui import QColor
                 from .ui import NODES
-                if "color" in item and QColor(str(item["color"])).isValid():
+                if item.get('color') == 'auto':
+                    normalized['color'] = 'auto'
+                elif "color" in item and QColor(str(item["color"])).isValid():
                     normalized["color"] = QColor(str(item["color"])).name()
                 if item.get("icon") in NODES:
                     normalized["icon"] = item["icon"]

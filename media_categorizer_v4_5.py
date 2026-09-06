@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QIcon,
     QColor,
     QImage,
@@ -70,7 +71,7 @@ from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, Vi
 from media_categorizer.photo_editor import PhotoEditor
 from media_categorizer.video_editor import VideoEditor
 from media_categorizer.category_widgets import CategoryButton, CategoryStrip
-from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon
+from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon, COLORS, THEME_NAMES
 
 RESERVED_SHORTCUTS = {
     QKeySequence(Qt.Key_Right).toString(QKeySequence.PortableText),
@@ -379,10 +380,10 @@ class CategoriesDialog(QDialog):
                 item.get("shortcut", ""),
                 item.get("action", "rename"),
                 item.get("destination", ""),
-                item.get("color", "#739cff"), item.get("icon", "tags"),
+                item.get("color", "auto"), item.get("icon", "tags"),
             )
 
-    def add_row(self, name="", shortcut="", action="rename", destination="", color="#739cff", icon_name="tags"):
+    def add_row(self, name="", shortcut="", action="rename", destination="", color="auto", icon_name="tags"):
         row = self.table.rowCount()
         self.table.insertRow(row)
         name_item = QTableWidgetItem(name)
@@ -408,13 +409,20 @@ class CategoriesDialog(QDialog):
 
         color_button = QPushButton('Цвет')
         color_button.setProperty('categoryColor', color)
-        color_button.setStyleSheet(f'border-bottom: 4px solid {color};')
+        display_color = COLORS[QApplication.instance().property('theme') or 'dark']['accent'] if color == 'auto' else color
+        color_button.setStyleSheet(f'border-bottom: 4px solid {display_color};')
         def choose_color():
-            chosen = QColorDialog.getColor(QColor(color_button.property('categoryColor')), self)
+            chosen = QColorDialog.getColor(QColor(COLORS[QApplication.instance().property('theme') or 'dark']['accent'] if color_button.property('categoryColor') == 'auto' else color_button.property('categoryColor')), self)
             if chosen.isValid():
                 color_button.setProperty('categoryColor', chosen.name())
                 color_button.setStyleSheet(f'border-bottom: 4px solid {chosen.name()};')
-        color_button.clicked.connect(choose_color)
+        def use_theme_color():
+            color_button.setProperty('categoryColor', 'auto')
+            color_button.setStyleSheet('border-bottom: 4px solid ' + COLORS[QApplication.instance().property('theme') or 'dark']['accent'] + ';')
+        color_menu = QMenu(color_button)
+        color_menu.addAction('Цвет темы').triggered.connect(use_theme_color)
+        color_menu.addAction('Выбрать цвет…').triggered.connect(choose_color)
+        color_button.setMenu(color_menu)
         self.table.setCellWidget(row, 4, color_button)
         icons = QComboBox()
         for label, value in [('Тег','tags'), ('Галочка','check'), ('Видео','film'), ('Фото','images'), ('Папка','folder-open'), ('Информация','info'), ('Редактировать','pencil')]:
@@ -505,7 +513,7 @@ class CategoriesDialog(QDialog):
                 "shortcut": shortcut,
                 "action": action,
                 "destination": destination,
-                "color": item.get("color", "#739cff"),
+                "color": item.get("color", "auto"),
                 "icon": item.get("icon", "tags"),
             })
 
@@ -1015,7 +1023,19 @@ class MediaCategorizer(QMainWindow):
         self.theme_btn = IconButton("sun", "Сменить тему", compact=True)
         self.theme_btn.icon_name = "moon" if QApplication.instance().property("theme") == "light" else "sun"
         self.theme_btn.refresh_icon()
-        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.theme_btn.setToolTip('Выбрать тему оформления')
+        theme_menu = QMenu(self.theme_btn)
+        self.theme_actions = {}
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        for theme_id, label in THEME_NAMES.items():
+            action = theme_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(theme_id == QApplication.instance().property('theme'))
+            action.triggered.connect(lambda checked=False, value=theme_id: self.set_theme(value))
+            theme_group.addAction(action)
+            self.theme_actions[theme_id] = action
+        self.theme_btn.setMenu(theme_menu)
         self.menu_btn = IconButton("settings-2", "Настройки")
         menu = QMenu(self.menu_btn)
         for button, callback in ((self.settings_btn, self.edit_categories), (self.template_btn, self.edit_rename_template), (self.log_btn, self.show_log), (self.duplicates_btn, self.show_duplicates)):
@@ -1317,11 +1337,17 @@ class MediaCategorizer(QMainWindow):
         self.setCentralWidget(central)
 
     def toggle_theme(self):
-        theme = "light" if QApplication.instance().property("theme") == "dark" else "dark"
+        self.set_theme("light" if QApplication.instance().property("theme") != "light" else "dark")
+
+    def set_theme(self, theme):
+        theme = theme if theme in COLORS else "dark"
         self.settings["theme"] = theme
         apply_theme(theme)
         self.theme_btn.icon_name = "moon" if theme == "light" else "sun"
         self.theme_btn.refresh_icon()
+        self.theme_btn.setToolTip("Тема: " + THEME_NAMES[theme])
+        for key, action in self.theme_actions.items():
+            action.setChecked(key == theme)
         self._persist_settings()
 
     def _load_toggle_settings(self):

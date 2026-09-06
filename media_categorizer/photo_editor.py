@@ -163,10 +163,10 @@ class CropCanvas(QWidget):
                               self.selection.width()*scale, self.selection.height()*scale)
             painter.fillRect(rect, QColor(0, 0, 0, 130))
             painter.drawImage(selected, self.image, QRectF(self.selection))
-            painter.setPen(QPen(QColor('#ffffff'), 1.5))
+            painter.setPen(QPen(QColor(c['accent']), 1.5))
             painter.drawRect(selected)
             for point in (selected.topLeft(), selected.topRight(), selected.bottomLeft(), selected.bottomRight()):
-                painter.fillRect(QRectF(point.x()-4, point.y()-4, 8, 8), QColor("white"))
+                painter.fillRect(QRectF(point.x()-4, point.y()-4, 8, 8), QColor(c['accent']))
             for part in (1/3, 2/3):
                 painter.drawLine(QPointF(selected.x()+selected.width()*part, selected.top()), QPointF(selected.x()+selected.width()*part, selected.bottom()))
                 painter.drawLine(QPointF(selected.left(), selected.y()+selected.height()*part), QPointF(selected.right(), selected.y()+selected.height()*part))

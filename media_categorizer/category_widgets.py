@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, QMimeData, Signal
 from PySide6.QtGui import QDrag, QColor
-from PySide6.QtWidgets import QWidget
-from .ui import IconButton
+from PySide6.QtWidgets import QWidget, QApplication
+from .ui import IconButton, COLORS
 
 MIME = 'application/x-mediacategorizer-category'
 
@@ -12,10 +12,14 @@ class CategoryButton(IconButton):
         label = name + (f'  [{shortcut}]' if shortcut else '') + '\n' + action_label
         super().__init__(category.get('icon', 'tags'), label, parent)
         self.category_name = name
-        color = QColor(category.get('color', '#739cff'))
+        self.category_color = category.get('color', 'auto')
+        self.refresh_theme()
+        self.origin = None
+
+    def refresh_theme(self):
+        color = QColor(COLORS[QApplication.instance().property('theme') or 'dark']['accent'] if self.category_color == 'auto' else self.category_color)
         if color.isValid():
             self.setStyleSheet(f'QPushButton {{ border-left: 5px solid {color.name()}; }}')
-        self.origin = None
 
     def mousePressEvent(self, event):
         self.origin = event.position().toPoint()

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "6.1.0"
+#define AppVersion "6.2.0"
 #endif
 #define AppKey "Software\MediaCategorizer"
 #define UninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaCategorizer_is1"

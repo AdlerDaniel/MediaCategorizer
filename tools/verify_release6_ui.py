@@ -13,8 +13,8 @@ from media_categorizer_v4_5 import MediaCategorizer, CategoriesDialog
 from media_categorizer.photo_editor import PhotoEditor
 from media_categorizer.library import LibraryDialog
 from media_categorizer.batch import BatchDialog
-from media_categorizer.updates import UpdatesDialog
-from media_categorizer.ui import apply_theme
+from media_categorizer.updates import UpdatesDialog, UpdatePrompt
+from media_categorizer.ui import apply_theme, THEME_NAMES
 
 app = QApplication([])
 output = Path(__file__).resolve().parents[1] / 'build/qa'
@@ -55,8 +55,9 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(batch.plans) == 3
     categories = CategoriesDialog(main.categories, main)
     updates = UpdatesDialog(main)
-    windows = [('main',main),('photo',photo),('library',library),('batch',batch),('categories',categories),('updates',updates)]
-    for theme in ('dark', 'light'):
+    prompt = UpdatePrompt(main, dict(version='99.0.0', notes='Описание выпуска с GitHub'))
+    windows = [('prompt',prompt),('main',main),('photo',photo),('library',library),('batch',batch),('categories',categories),('updates',updates)]
+    for theme in THEME_NAMES:
         apply_theme(theme)
         for name, widget in windows:
             widget.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -71,4 +72,4 @@ with tempfile.TemporaryDirectory() as directory:
         widget.close()
     main.thread_pool.waitForDone()
     settle()
-print('Library, batch plan, photo editor, categories, About and both themes: OK')
+print('Library, batch plan, photo editor, categories, About, update prompt and all six themes: OK')

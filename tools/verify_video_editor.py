@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ['QT_QPA_PLATFORM'] = 'windows'
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import QApplication, QMessageBox
-from media_categorizer.ui import apply_theme
+from media_categorizer.ui import apply_theme, THEME_NAMES
 from media_categorizer.video_editor import VideoEditor
 from media_categorizer.video_export import tool, probe, CREATE_FLAGS
 root = Path(__file__).resolve().parents[1]
@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as temp:
     editor.end.setValue(2)
     editor.volume.setValue(150)
     settle(.2)
-    for theme in ('dark', 'light'):
+    for theme in THEME_NAMES:
         apply_theme(theme)
         settle(.2)
         editor.grab().save(str(output / ('video-editor-' + theme + '.png')))
