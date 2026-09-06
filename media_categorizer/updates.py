@@ -7,9 +7,10 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
 import urllib.request
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QProgressBar, QMessageBox
+from PySide6.QtCore import QThread, Signal, QObject, QTimer
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit, QProgressBar, QMessageBox
 from .constants import APP_VERSION
 from .settings import app_config_dir
 from .ui import IconButton
@@ -95,11 +96,13 @@ class UpdatesDialog(QDialog):
         super().__init__(main)
         self.main = main
         self.worker = None
+        self.auto_install = False
+        self.cancel_pending = False
         self.release, self.downloaded = None, None
         self.setWindowTitle('О программе и обновления')
         self.resize(660, 470)
         self.repository = QLineEdit(main.settings.get('update_repository', DEFAULT_REPOSITORY))
-        self.status = QLabel('Проверка выполняется только по нажатию кнопки.')
+        self.status = QLabel('Обновления проверяются при запуске. Здесь можно проверить повторно.')
         self.status.setWordWrap(True)
         self.notes = QTextEdit()
         self.notes.setReadOnly(True)
@@ -127,6 +130,7 @@ class UpdatesDialog(QDialog):
         layout.addWidget(self.install_btn)
 
     def start(self, release=None):
+        self.cancel_pending = False
         self.check_btn.setEnabled(False)
         self.download_btn.setEnabled(False)
         self.install_btn.setEnabled(False)
@@ -151,8 +155,13 @@ class UpdatesDialog(QDialog):
         worker, self.worker = self.worker, None
         self.repository.setEnabled(True)
         self.check_btn.setEnabled(True)
+        if self.cancel_pending:
+            worker.deleteLater()
+            super().reject()
+            return
         if worker.error:
             self.status.setText('Не удалось проверить или загрузить обновление: ' + worker.error)
+            self.download_btn.setEnabled(self.release is not None)
         elif worker.release:
             self.downloaded = worker.result
             self.install_btn.setEnabled(True)
@@ -166,28 +175,116 @@ class UpdatesDialog(QDialog):
             self.main.settings['update_repository'] = self.repository.text().strip()
             self.main._persist_settings()
         worker.deleteLater()
+        if worker.release and not worker.error and self.auto_install:
+            self.install()
 
     def install(self):
         if not self.downloaded or not self.release:
             return
-        if hashlib.sha256(Path(self.downloaded).read_bytes()).hexdigest() != self.release['sha256']:
+        try:
+            with Path(self.downloaded).open('rb') as stream:
+                valid = hashlib.file_digest(stream, 'sha256').hexdigest() == self.release['sha256']
+        except OSError:
+            valid = False
+        if not valid:
             self.status.setText('Файл изменился после загрузки. Скачайте обновление заново.')
             self.install_btn.setEnabled(False)
+            self.download_btn.setEnabled(True)
             return
         if self.main.active_file_operation or self.main.file_operation_queue:
             QMessageBox.information(self, 'Обновление', 'Дождитесь завершения очереди операций.')
             return
         escaped = self.downloaded.replace("'", "''")
-        script = f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; Start-Process -FilePath '{escaped}'"
+        script = f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; Start-Process -FilePath '{escaped}' -ArgumentList '/SILENT','/NORESTART','/RESTARTAPP=1'"
         command = base64.b64encode(script.encode('utf-16le')).decode('ascii')
         powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        subprocess.Popen([str(powershell), '-NoProfile', '-EncodedCommand', command], creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            subprocess.Popen([str(powershell), '-NoProfile', '-EncodedCommand', command], creationflags=subprocess.CREATE_NO_WINDOW)
+        except OSError as exc:
+            self.status.setText('Не удалось запустить обновление: ' + str(exc))
+            return
         self.accept()
         self.main.close()
 
     def reject(self):
         if self.worker:
+            self.cancel_pending = True
             self.worker.requestInterruption()
-            self.status.setText('Ожидание завершения запроса… После завершения можно закрыть окно.')
+            self.status.setText('Отмена загрузки… Окно закроется после завершения запроса.')
             return
         super().reject()
+
+
+class UpdatePrompt(UpdatesDialog):
+    """One click downloads, verifies, closes the app and starts the updater."""
+    def __init__(self, main, release):
+        super().__init__(main)
+        self.release = release
+        self.auto_install = True
+        self.setWindowTitle('Доступно обновление Media Categorizer')
+        self.status.setText('Доступна версия ' + release['version'] + '. Нажмите «Обновить»: программа скачает обновление, закроется и запустится после установки.')
+        self.notes.setPlainText(release.get('notes', ''))
+        self.repository.setReadOnly(True)
+        self.check_btn.setText('Позже')
+        self.check_btn.clicked.disconnect()
+        self.check_btn.clicked.connect(self.reject)
+        self.download_btn.setText('Обновить')
+        self.download_btn.setProperty('primary', True)
+        self.download_btn.setEnabled(True)
+        self.install_btn.hide()
+
+    def start(self, release=None):
+        super().start(release)
+        self.check_btn.setText('Отменить')
+        self.check_btn.setEnabled(True)
+
+
+class StartupUpdates(QObject):
+    ready = Signal(object)
+
+    def __init__(self, main):
+        super().__init__(main)
+        self.main = main
+        self.pending = None
+        self.started = False
+        self.cancelled = threading.Event()
+        self.ready.connect(self.checked)
+        self.timer = QTimer(self)
+        self.timer.setInterval(500)
+        self.timer.timeout.connect(self.offer)
+
+    def start(self):
+        if self.started or self.cancelled.is_set():
+            return
+        self.started = True
+        repository = self.main.settings.get('update_repository', DEFAULT_REPOSITORY)
+        def check():
+            try:
+                release = latest_release(repository)
+                if not self.cancelled.is_set():
+                    self.ready.emit(release)
+            except Exception:
+                pass  # Offline startup must remain quiet and responsive.
+        threading.Thread(target=check, name='startup-update-check', daemon=True).start()
+
+    def checked(self, release):
+        if self.cancelled.is_set() or version_tuple(release['version']) <= version_tuple(APP_VERSION):
+            return
+        self.pending = release
+        self.timer.start()
+        self.offer()
+
+    def offer(self):
+        if self.cancelled.is_set() or not self.pending:
+            return
+        if (not self.main.isVisible() or QApplication.activeModalWidget() is not None
+                or self.main.active_file_operation or self.main.file_operation_queue):
+            return
+        self.timer.stop()
+        release, self.pending = self.pending, None
+        UpdatePrompt(self.main, release).exec()
+
+    def stop(self):
+        self.cancelled.set()
+        self.timer.stop()
+        self.pending = None

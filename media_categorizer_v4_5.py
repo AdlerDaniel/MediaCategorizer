@@ -3008,6 +3008,8 @@ class MediaCategorizer(QMainWindow):
             return
         self.stop_all_video()
         self.settings["window_maximized"] = self.isMaximized() or self.fullscreen_mode
+        if hasattr(self, 'startup_updates'):
+            self.startup_updates.stop()
         self._persist_settings()
         super().closeEvent(event)
 
@@ -3022,4 +3024,7 @@ if __name__ == "__main__":
     app.setApplicationName(APP_NAME)
     window = MediaCategorizer()
     window.show()
+    from media_categorizer.updates import StartupUpdates
+    window.startup_updates = StartupUpdates(window)
+    QTimer.singleShot(1000, window.startup_updates.start)
     sys.exit(app.exec())

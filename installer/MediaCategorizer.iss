@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "6.0.0"
+#define AppVersion "6.1.0"
 #endif
 #define AppKey "Software\MediaCategorizer"
 #define UninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaCategorizer_is1"
@@ -52,8 +52,13 @@ Name: "{autodesktop}\Media Categorizer"; Filename: "{app}\MediaCategorizer.exe";
 #endif
 [Run]
 Filename: "{app}\MediaCategorizer.exe"; Description: "Запустить Media Categorizer"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\MediaCategorizer.exe"; Flags: nowait; Check: RestartAfterUpdate
 [Code]
 var ExistingDir: String;
+function RestartAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RESTARTAPP|0}') = '1');
+end;
 function InitializeSetup(): Boolean;
 var ExistingVersion: String; OldVersion, NewVersion: Int64;
 begin
