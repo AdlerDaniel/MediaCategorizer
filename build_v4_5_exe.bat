@@ -8,6 +8,9 @@ if errorlevel 1 goto :error
 python -m unittest discover -s tests -v
 if errorlevel 1 goto :error
 
+python tools/prepare_ffmpeg.py
+if errorlevel 1 goto :error
+
 python tools/prepare_release.py
 if errorlevel 1 goto :error
 

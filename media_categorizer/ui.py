@@ -109,7 +109,7 @@ def apply_theme(theme):
         QLabel#muted { color: %(muted)s; }
         QGroupBox { background: %(panel)s; border: 1px solid %(border)s; border-radius: 10px; margin-top: 14px; padding: 16px 10px 10px; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; }
-        QComboBox, QLineEdit, QKeySequenceEdit { background: %(panel)s; border: 1px solid %(border)s; border-radius: 6px; padding: 7px; min-height: 20px; }
+        QComboBox, QLineEdit, QKeySequenceEdit, QDoubleSpinBox { background: %(panel)s; border: 1px solid %(border)s; border-radius: 6px; padding: 7px; min-height: 20px; }
         QComboBox::drop-down { border: none; width: 20px; }
         QMenu { background: %(panel)s; border: 1px solid %(border)s; padding: 6px; }
         QMenu::item { padding: 9px 24px; border-radius: 5px; }

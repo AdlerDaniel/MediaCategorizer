@@ -10,3 +10,6 @@ venv/
 htmlcov/
 *.log
 *.part
+
+# Bundled tools are staged by tools/prepare_ffmpeg.py
+media_categorizer/assets/ffmpeg/*.exe

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "5.1.0"
+#define AppVersion "5.2.0"
 #endif
 #define AppKey "Software\MediaCategorizer"
 #define UninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaCategorizer_is1"
@@ -39,6 +39,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "..\dist\MediaCategorizer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\media_categorizer\assets\LUCIDE-LICENSE"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\dist\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
 [Registry]
 Root: HKCU; Subkey: "{#AppKey}"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "{#AppKey}"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"

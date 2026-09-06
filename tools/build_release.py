@@ -20,7 +20,8 @@ def main():
             compiler = str(candidate)
     if not compiler:
         parser.error('Install Inno Setup or supply --iscc PATH (https://jrsoftware.org/isdl.php).')
-    for command in ([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
+    for command in ([sys.executable, 'tools/prepare_ffmpeg.py'],
+                    [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'],
                     [sys.executable, 'tools/prepare_release.py'],
                     [sys.executable, 'tools/build_exe.py'],
                     [compiler, '/DAppVersion=' + APP_VERSION, 'installer/MediaCategorizer.iss'],

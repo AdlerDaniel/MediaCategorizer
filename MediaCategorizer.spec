@@ -5,7 +5,7 @@ a = Analysis(
     ['media_categorizer_v4_5.py'],
     pathex=[],
     binaries=[],
-    datas=[('media_categorizer/assets', 'media_categorizer/assets')],
+    datas=[('media_categorizer/assets/icons.json', 'media_categorizer/assets'), ('media_categorizer/assets/app.ico', 'media_categorizer/assets'), ('media_categorizer/assets/LUCIDE-LICENSE', 'media_categorizer/assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

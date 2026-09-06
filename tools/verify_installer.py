@@ -80,6 +80,12 @@ def main():
             smoke = subprocess.run([str(powershell), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(ROOT / 'tools/verify_exe.ps1'), '-Executable', str(executable)], capture_output=True, text=True, timeout=60)
             assert smoke.returncode == 0, smoke.stdout + smoke.stderr
             report['installed_app_launch'] = json.loads(smoke.stdout.strip())
+            for binary in ('ffmpeg.exe', 'ffprobe.exe'):
+                installed_tool = target / 'ffmpeg' / binary
+                assert digest(installed_tool) == digest(ROOT / 'dist/ffmpeg' / binary)
+                checked = subprocess.run([str(installed_tool), '-version'], capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+                assert checked.returncode == 0
+            report['bundled_video_tools'] = True
             execute(update, 'repeat-update')
             set_version('99.0.0')
             execute(update, 'downgrade-blocked', success=False)

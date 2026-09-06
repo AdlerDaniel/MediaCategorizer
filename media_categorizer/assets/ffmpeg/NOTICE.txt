@@ -1,0 +1,5 @@
+FFmpeg 8.1.2 full build by Gyan Doshi.
+https://www.gyan.dev/ffmpeg/builds/
+FFmpeg source: https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz
+Build and dependency sources: https://github.com/GyanD/codexffmpeg
+License: GPL version 3 or later; see LICENSE.txt.

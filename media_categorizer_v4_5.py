@@ -65,6 +65,7 @@ from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, Vi
 
 
 from media_categorizer.photo_editor import PhotoEditor
+from media_categorizer.video_editor import VideoEditor
 from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon
 
 RESERVED_SHORTCUTS = {
@@ -995,7 +996,7 @@ class MediaCategorizer(QMainWindow):
         self.loop_btn = ToggleSwitch("Повтор")
         self.sound_btn = ToggleSwitch("Звук")
         self.edit_photo_btn = IconButton("pencil", "Редактировать")
-        self.edit_photo_btn.clicked.connect(self.edit_photo)
+        self.edit_photo_btn.clicked.connect(self.edit_current_media)
         self.rotate_left_btn = IconButton("rotate-ccw", "Повернуть влево", compact=True)
         self.rotate_right_btn = IconButton("rotate-cw", "Повернуть вправо", compact=True)
         self.thumbnail_toggle_btn = IconButton("images", "Миниатюры", compact=True)
@@ -1452,6 +1453,38 @@ class MediaCategorizer(QMainWindow):
         if enabled:
             self.update_file_properties()
         QTimer.singleShot(0, self, self._on_media_viewport_resized)
+
+    def edit_current_media(self):
+        if self.current_file and self.current_file.suffix.lower() in VIDEO_EXTENSIONS:
+            self.edit_video()
+        else:
+            self.edit_photo()
+
+    def edit_video(self):
+        path = self.current_file
+        if not path or path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return
+        operation_id = 'video-editor-' + uuid.uuid4().hex
+        try:
+            self.file_reservations.acquire(operation_id, path)
+        except RuntimeError as exc:
+            QMessageBox.information(self, APP_NAME, str(exc))
+            return
+        dialog = None
+        try:
+            self.update_controls()
+            self.stop_all_video()
+            dialog = VideoEditor(path, self)
+            if dialog.exec() == QDialog.Accepted:
+                self.thumbnail_cache.pop(str(path), None)
+                self.append_log('EDIT_VIDEO', path, path, detail='Обрезка и громкость; 720p / 30 fps')
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, 'Редактор видео', str(exc))
+        finally:
+            if dialog is not None:
+                dialog.deleteLater()
+            self.file_reservations.release(operation_id)
+            self.show_current_file()
 
     def edit_photo(self):
         path = self.current_file
@@ -2842,7 +2875,7 @@ class MediaCategorizer(QMainWindow):
         self.right_nav_btn.setEnabled(bool(self.files and has_current and self.current_index < len(self.files) - 1))
         self.undo_btn.setEnabled(self._can_undo())
         busy = has_current and self.file_reservations.is_busy(self.current_file)
-        self.edit_photo_btn.setEnabled(bool(has_current and not busy and self.current_file.suffix.lower() in IMAGE_EXTENSIONS))
+        self.edit_photo_btn.setEnabled(bool(has_current and not busy and self.current_file.suffix.lower() in SUPPORTED_EXTENSIONS))
         for button in self.category_buttons.values():
             button.setEnabled(has_current and not busy)
         self.undo_btn.setToolTip("Дождитесь завершения операции с этим файлом"
