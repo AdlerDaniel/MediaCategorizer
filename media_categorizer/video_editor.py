@@ -3,24 +3,26 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QDoubleSpinBox, QProgressBar, QMessageBox
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QDoubleSpinBox, QProgressBar, QMessageBox, QComboBox
 from .ui import IconButton
-from .video_export import VideoExport, ExportCancelled, probe, signature
+from .video_export import VideoExport, ExportCancelled, ExportOptions, probe, signature
+from .timeline import RangeTimeline, TimelineAssets
 
 
 class ExportThread(QThread):
     progress = Signal(int)
 
-    def __init__(self, path, start, end, volume, expected, parent=None):
+    def __init__(self, path, start, end, volume, expected, parent=None, options=None):
         super().__init__(parent)
         self.job = VideoExport()
         self.arguments = path, start, end, volume, expected
+        self.options = options
         self.error = None
         self.was_cancelled = False
 
     def run(self):
         try:
-            self.job.run(*self.arguments, self.progress.emit)
+            self.job.run(*self.arguments, self.progress.emit, options=self.options)
         except ExportCancelled:
             self.was_cancelled = True
         except Exception as exc:
@@ -34,6 +36,7 @@ class VideoEditor(QDialog):
         self.expected = signature(path)
         self.info = probe(path)
         self.worker = None
+        self.assets = None
         self.close_after_cancel = False
         self.setWindowTitle('Редактировать видео — ' + self.path.name)
         self.resize(1000, 780)
@@ -47,6 +50,8 @@ class VideoEditor(QDialog):
         self.play_btn = IconButton('play', 'Воспроизвести выделенный отрезок', compact=True)
         self.play_btn.clicked.connect(self.toggle_play)
         self.player.playbackStateChanged.connect(lambda state: self.play_btn.set_playing(state == QMediaPlayer.PlayingState))
+        self.range_timeline = RangeTimeline(self.info["duration"])
+        self.range_timeline.seekRequested.connect(self.player.setPosition)
         self.timeline = QSlider(Qt.Horizontal)
         self.timeline.setRange(0, round(self.info['duration']*1000))
         self.timeline.sliderMoved.connect(self.player.setPosition)
@@ -75,7 +80,19 @@ class VideoEditor(QDialog):
         self.volume.valueChanged.connect(self.volume_changed)
         self.reset_btn = IconButton('undo-2', 'Сбросить')
         self.reset_btn.clicked.connect(self.reset)
-        self.save_btn = IconButton('check', 'Сохранить · 720p / 30 fps')
+        self.resolution = QComboBox()
+        for label, value in [('720p', '720'), ('1080p', '1080'), ('Исходное разрешение', 'source')]:
+            self.resolution.addItem(label, value)
+        self.fps = QComboBox()
+        for label, value in [('30 fps', 30), ('24 fps', 24), ('25 fps', 25), ('60 fps', 60), ('Исходная частота', 0)]:
+            self.fps.addItem(label, value)
+        self.quality = QComboBox()
+        for label, value in [('Сбалансированное', 'balanced'), ('Высокое качество', 'high'), ('Меньше размер', 'compact')]:
+            self.quality.addItem(label, value)
+        self.estimate = QLabel()
+        for widget in (self.resolution, self.fps, self.quality):
+            widget.currentIndexChanged.connect(self.update_controls)
+        self.save_btn = IconButton('check', 'Сохранить видео')
         self.save_btn.setProperty('primary', True)
         self.save_btn.clicked.connect(self.save)
         self.cancel_btn = IconButton('x', 'Закрыть')
@@ -87,12 +104,13 @@ class VideoEditor(QDialog):
         self.end.valueChanged.connect(self.update_controls)
         layout = QVBoxLayout(self)
         portrait = self.info['height'] > self.info['width']
-        layout.addWidget(QLabel(('720 × 1280' if portrait else '1280 × 720') + ' · 30 кадров/с · сохранение заменит исходное видео'))
+        layout.addWidget(QLabel('Выберите отрезок и параметры экспорта. Сохранение заменит исходное видео.'))
         layout.addWidget(self.video, 1)
         transport = QHBoxLayout()
         for widget in (self.play_btn, self.timeline, self.time_label):
             transport.addWidget(widget)
         layout.addLayout(transport)
+        layout.addWidget(self.range_timeline)
         trim = QHBoxLayout()
         for widget in (QLabel('Начало'), self.start, self.mark_start, QLabel('Конец'), self.end, self.mark_end):
             trim.addWidget(widget)
@@ -101,6 +119,10 @@ class VideoEditor(QDialog):
         for widget in (QLabel('Громкость'), self.volume, self.volume_label, self.reset_btn):
             sound.addWidget(widget)
         layout.addLayout(sound)
+        options_row = QHBoxLayout()
+        for widget in (self.resolution, self.fps, self.quality, self.estimate):
+            options_row.addWidget(widget)
+        layout.addLayout(options_row)
         layout.addWidget(self.status)
         layout.addWidget(self.progress)
         footer = QHBoxLayout()
@@ -109,8 +131,39 @@ class VideoEditor(QDialog):
         footer.addWidget(self.save_btn)
         layout.addLayout(footer)
         self.player.errorOccurred.connect(self.preview_error)
+        self.range_timeline.rangeChanged.connect(self.range_changed)
         self.update_controls()
         self.player.setSource(QUrl.fromLocalFile(str(self.path)))
+        self.assets = TimelineAssets(self.path, self.info["duration"], bool(self.info["audio"]), self)
+        self.assets.finished.connect(self.assets_ready)
+        self.assets.start()
+
+    def options(self):
+        return ExportOptions(self.resolution.currentData(), self.fps.currentData(), self.quality.currentData())
+
+    def range_changed(self, start, end):
+        self.start.blockSignals(True)
+        self.end.blockSignals(True)
+        self.start.setValue(start)
+        self.end.setValue(end)
+        self.start.blockSignals(False)
+        self.end.blockSignals(False)
+        self.update_controls()
+
+    def assets_ready(self):
+        if self.assets:
+            self.range_timeline.images = self.assets.images
+            self.range_timeline.waveform = self.assets.waveform
+            self.range_timeline.update()
+
+    def stop_assets(self):
+        if self.assets and self.assets.isRunning():
+            self.assets.stop()
+            self.assets.wait()
+
+    def accept(self):
+        self.stop_assets()
+        super().accept()
 
     def preview_error(self, error, message):
         if not self.worker:
@@ -123,6 +176,10 @@ class VideoEditor(QDialog):
             widget.setEnabled(not busy)
         self.volume.setEnabled(not busy and bool(self.info['audio']))
         self.save_btn.setEnabled(not busy and duration >= 1/30)
+        self.range_timeline.set_range(self.start.value(), self.end.value())
+        size = self.options().estimate_bytes(self.info, max(0,duration))/1024/1024
+        self.estimate.setText(f"≈ {size*.7:.1f}–{size*1.4:.1f} МБ")
+        self.estimate.setToolTip("Ориентировочный размер: зависит от содержимого и контейнера")
         self.cancel_btn.setText('Отменить сохранение' if busy else 'Закрыть')
         if not busy:
             self.status.setText(f'Останется {max(0, duration):.3f} с. ' + ('0% — без звука, 100% — исходная громкость.' if self.info['audio'] else 'В видео нет звуковой дорожки.'))
@@ -133,6 +190,7 @@ class VideoEditor(QDialog):
         self.audio.setVolume(value/200)
 
     def position_changed(self, value):
+        self.range_timeline.set_position(value)
         if not self.timeline.isSliderDown():
             self.timeline.setValue(value)
         seconds = value/1000
@@ -157,9 +215,10 @@ class VideoEditor(QDialog):
     def save(self):
         if self.worker or self.end.value()-self.start.value() < 1/30:
             return
+        self.stop_assets()
         self.player.stop()
         self.player.setSource(QUrl())  # Release Windows file handles before replacement.
-        self.worker = ExportThread(self.path, self.start.value(), self.end.value(), self.volume.value()/100, self.expected, self)
+        self.worker = ExportThread(self.path, self.start.value(), self.end.value(), self.volume.value()/100, self.expected, self, options=self.options())
         self.worker.progress.connect(self.progress.setValue)
         self.worker.finished.connect(self.export_finished)
         self.progress.setValue(0)
@@ -194,6 +253,7 @@ class VideoEditor(QDialog):
             self.reject()
 
     def reject(self):
+        self.stop_assets()
         if self.worker:
             self.close_after_cancel = True
             self.worker.job.cancel()

@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Q
 from PySide6.QtGui import (
     QAction,
     QIcon,
+    QColor,
     QImage,
     QImageReader,
     QKeySequence,
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QColorDialog,
+    QInputDialog,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -66,6 +69,7 @@ from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, Vi
 
 from media_categorizer.photo_editor import PhotoEditor
 from media_categorizer.video_editor import VideoEditor
+from media_categorizer.category_widgets import CategoryButton, CategoryStrip
 from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon
 
 RESERVED_SHORTCUTS = {
@@ -290,17 +294,18 @@ class CategoriesDialog(QDialog):
     def __init__(self, categories, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Категории, клавиши и действия")
-        self.resize(950, 560)
+        self.resize(1160, 600)
 
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels([
-            "Категория", "Горячая клавиша", "Действие", "Папка назначения"
+            "Категория", "Горячая клавиша", "Действие", "Папка назначения", "Цвет", "Иконка"
         ])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(44)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
 
         add_button = QPushButton("Добавить")
@@ -310,7 +315,7 @@ class CategoriesDialog(QDialog):
         save_button = QPushButton("Сохранить")
         cancel_button = QPushButton("Отмена")
 
-        add_button.clicked.connect(self.add_row)
+        add_button.clicked.connect(lambda: self.add_row())
         delete_button.clicked.connect(self.delete_row)
         up_button.clicked.connect(lambda: self.move_row(-1))
         down_button.clicked.connect(lambda: self.move_row(1))
@@ -336,7 +341,35 @@ class CategoriesDialog(QDialog):
         layout.addWidget(info)
         layout.addWidget(self.table)
         layout.addLayout(controls)
+        self.profiles = dict(parent.settings.get('category_profiles', {})) if parent else {}
+        profile_row = QHBoxLayout()
+        self.profile_combo = QComboBox()
+        self.refresh_profiles()
+        load_profile = QPushButton('Загрузить набор')
+        save_profile = QPushButton('Сохранить набор')
+        delete_profile = QPushButton('Удалить набор')
+        load_profile.clicked.connect(lambda: self.set_categories(self.profiles[self.profile_combo.currentText()]) if self.profile_combo.currentText() in self.profiles else None)
+        save_profile.clicked.connect(self.save_profile)
+        delete_profile.clicked.connect(self.delete_profile)
+        for widget in (QLabel('Наборы категорий'), self.profile_combo, load_profile, save_profile, delete_profile):
+            profile_row.addWidget(widget)
+        layout.insertLayout(0, profile_row)
         self.set_categories(categories)
+
+    def refresh_profiles(self):
+        self.profile_combo.clear()
+        self.profile_combo.addItems(sorted(self.profiles))
+
+    def save_profile(self):
+        name, ok = QInputDialog.getText(self, 'Набор категорий', 'Название набора:')
+        if ok and name.strip():
+            self.profiles[name.strip()] = self.snapshot()
+            self.refresh_profiles()
+            self.profile_combo.setCurrentText(name.strip())
+
+    def delete_profile(self):
+        self.profiles.pop(self.profile_combo.currentText(), None)
+        self.refresh_profiles()
 
     def set_categories(self, categories):
         self.table.setRowCount(0)
@@ -346,9 +379,10 @@ class CategoriesDialog(QDialog):
                 item.get("shortcut", ""),
                 item.get("action", "rename"),
                 item.get("destination", ""),
+                item.get("color", "#739cff"), item.get("icon", "tags"),
             )
 
-    def add_row(self, name="", shortcut="", action="rename", destination=""):
+    def add_row(self, name="", shortcut="", action="rename", destination="", color="#739cff", icon_name="tags"):
         row = self.table.rowCount()
         self.table.insertRow(row)
         name_item = QTableWidgetItem(name)
@@ -372,6 +406,21 @@ class CategoriesDialog(QDialog):
         )
         self._sync_destination_enabled(action_combo, dest_editor)
 
+        color_button = QPushButton('Цвет')
+        color_button.setProperty('categoryColor', color)
+        color_button.setStyleSheet(f'border-bottom: 4px solid {color};')
+        def choose_color():
+            chosen = QColorDialog.getColor(QColor(color_button.property('categoryColor')), self)
+            if chosen.isValid():
+                color_button.setProperty('categoryColor', chosen.name())
+                color_button.setStyleSheet(f'border-bottom: 4px solid {chosen.name()};')
+        color_button.clicked.connect(choose_color)
+        self.table.setCellWidget(row, 4, color_button)
+        icons = QComboBox()
+        for label, value in [('Тег','tags'), ('Галочка','check'), ('Видео','film'), ('Фото','images'), ('Папка','folder-open'), ('Информация','info'), ('Редактировать','pencil')]:
+            icons.addItem(label, value)
+        icons.setCurrentIndex(max(0, icons.findData(icon_name)))
+        self.table.setCellWidget(row, 5, icons)
         self.table.setCurrentCell(row, 0)
         if not name:
             self.table.editItem(name_item)
@@ -400,6 +449,8 @@ class CategoriesDialog(QDialog):
                 "shortcut": shortcut,
                 "action": action,
                 "destination": destination,
+                "color": self.table.cellWidget(row, 4).property("categoryColor"),
+                "icon": self.table.cellWidget(row, 5).currentData(),
             })
         return data
 
@@ -454,6 +505,8 @@ class CategoriesDialog(QDialog):
                 "shortcut": shortcut,
                 "action": action,
                 "destination": destination,
+                "color": item.get("color", "#739cff"),
+                "icon": item.get("icon", "tags"),
             })
 
         if not cleaned:
@@ -971,7 +1024,11 @@ class MediaCategorizer(QMainWindow):
             button.clicked.connect(callback)
             button.setParent(self)
             button.hide()
+        menu.addSeparator()
+        menu.addAction("О программе и обновления").triggered.connect(self.show_updates)
         self.menu_btn.setMenu(menu)
+        self.library_btn = IconButton("images", "Библиотека и пакетная обработка", compact=True)
+        self.library_btn.clicked.connect(self.open_library)
         self.open_folder_btn.clicked.connect(self.open_folder)
         self.last_folder_btn.clicked.connect(self.open_last_folder)
         self.open_file_btn.clicked.connect(self.open_file)
@@ -981,7 +1038,7 @@ class MediaCategorizer(QMainWindow):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.addWidget(brand)
         top_layout.addSpacing(18)
-        for button in (self.open_folder_btn, self.last_folder_btn, self.open_file_btn, self.undo_btn):
+        for button in (self.open_folder_btn, self.last_folder_btn, self.open_file_btn, self.library_btn, self.undo_btn):
             top_layout.addWidget(button)
         top_layout.addStretch()
         top_layout.addWidget(self.progress_label)
@@ -1219,7 +1276,8 @@ class MediaCategorizer(QMainWindow):
         self.thumbnail_list.itemClicked.connect(self.on_thumbnail_clicked)
         self.thumbnail_list.hide()
 
-        self.category_widget = QWidget()
+        self.category_widget = CategoryStrip()
+        self.category_widget.reordered.connect(self.reorder_category)
         self.category_layout = QHBoxLayout(self.category_widget)
         self.category_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll = QScrollArea()
@@ -1339,6 +1397,46 @@ class MediaCategorizer(QMainWindow):
             return records
         except Exception:
             return []
+
+    def show_updates(self):
+        from media_categorizer.updates import UpdatesDialog
+        UpdatesDialog(self).exec()
+
+    def open_library(self):
+        if self.active_file_operation is not None or self.file_operation_queue:
+            QMessageBox.information(self, APP_NAME, "Дождитесь завершения текущих операций.")
+            return
+        from media_categorizer.library import LibraryDialog
+        LibraryDialog(self).exec()
+
+    def open_library_selection(self, paths, selected, folder):
+        self.stop_all_video()
+        self.files = list(paths)
+        self.current_index = self.files.index(selected)
+        self._clear_image_cache()
+        self.thumbnail_cache.clear()
+        self.pending_thumbnail_loads.clear()
+        self.undo_stack.clear()
+        self.settings['last_folder'] = str(folder)
+        self._persist_settings()
+        self._update_last_folder_button()
+        self.show_current_file()
+
+    def refresh_after_batch(self, results):
+        for result in results:
+            if result.get('status') != 'OK':
+                continue
+            source, target = result['source'], result['target']
+            if result['kind'] in ('rename', 'move'):
+                self.files = [target if path == source else path for path in self.files]
+            key = str(source)
+            self.image_revisions[key] = self.image_revisions.get(key, 0) + 1
+        self._clear_image_cache()
+        self.thumbnail_cache.clear()
+        self.pending_thumbnail_loads.clear()
+        self.files = [path for path in self.files if path.exists()]
+        self.current_index = min(self.current_index, max(0, len(self.files)-1))
+        self.show_current_file()
 
     def show_log(self):
         LogDialog(self.load_log_records(), self).exec()
@@ -1565,7 +1663,7 @@ class MediaCategorizer(QMainWindow):
             text = name
             if shortcut:
                 text += f"  [{shortcut}]"
-            button = IconButton("tags", text)
+            button = CategoryButton(item, action_label)
             button.setToolTip(action_label + (f" → {item.get('destination')}" if item.get("destination") else ""))
             button.setMinimumHeight(56)
             button.setCheckable(self.multi_btn.isChecked())
@@ -1577,6 +1675,16 @@ class MediaCategorizer(QMainWindow):
             self.category_buttons[name] = button
         self.category_layout.addStretch()
         self.rebuild_category_shortcuts()
+
+    def reorder_category(self, source, before):
+        moving = next((item for item in self.categories if item['name'] == source), None)
+        if moving is None or source == before:
+            return
+        self.categories.remove(moving)
+        index = next((i for i, item in enumerate(self.categories) if item['name'] == before), len(self.categories))
+        self.categories.insert(index, moving)
+        self.build_category_buttons()
+        self._persist_settings()
 
     def category_config(self, name):
         for item in self.categories:
@@ -1642,6 +1750,7 @@ class MediaCategorizer(QMainWindow):
         dialog = CategoriesDialog(self.categories, self)
         if dialog.exec():
             self.categories = dialog.result_categories()
+            self.settings["category_profiles"] = dialog.profiles
             self.settings["categories"] = self.categories
             self.clear_selected_tags()
             self.build_category_buttons()

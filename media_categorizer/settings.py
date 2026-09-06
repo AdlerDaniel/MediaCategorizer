@@ -54,12 +54,20 @@ def normalize_categories(data):
             if action not in ACTION_LABELS:
                 action = "rename"
             shortcut = QKeySequence(shortcut).toString(QKeySequence.PortableText)
-            result.append({
+            normalized = {
                 "name": name,
                 "shortcut": shortcut,
                 "action": action,
                 "destination": destination,
-            })
+            }
+            if isinstance(item, dict):
+                from PySide6.QtGui import QColor
+                from .ui import NODES
+                if "color" in item and QColor(str(item["color"])).isValid():
+                    normalized["color"] = QColor(str(item["color"])).name()
+                if item.get("icon") in NODES:
+                    normalized["icon"] = item["icon"]
+            result.append(normalized)
     return result or [dict(x) for x in DEFAULT_CATEGORIES]
 
 

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from dataclasses import dataclass
 from fractions import Fraction
 
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -69,6 +70,34 @@ def encoding(suffix):
     raise ValueError('Этот контейнер пока не поддерживается редактором.')
 
 
+@dataclass(frozen=True)
+class ExportOptions:
+    resolution: str = '720'
+    fps: int = 30
+    quality: str = 'balanced'
+
+    def dimensions(self, info):
+        if self.resolution == 'source':
+            return max(2, round(info['width']/2)*2), max(2, round(info['height']/2)*2)
+        if self.resolution not in ('720', '1080'):
+            raise ValueError('Неизвестное разрешение.')
+        short, long = (720, 1280) if self.resolution == '720' else (1080, 1920)
+        return (short, long) if info['height'] > info['width'] else (long, short)
+
+    def validate(self):
+        if self.fps not in (0, 24, 25, 30, 60) or self.quality not in ('high', 'balanced', 'compact'):
+            raise ValueError('Неверные параметры экспорта.')
+
+    def estimate_bytes(self, info, duration):
+        width, height = self.dimensions(info)
+        try:
+            fps = self.fps or float(Fraction(info['stream'].get('avg_frame_rate') or '30/1')) or 30
+        except (ValueError, ZeroDivisionError):
+            fps = 30
+        bitrate = width*height*fps*{'high':.12, 'balanced':.08, 'compact':.045}[self.quality]
+        return duration*(bitrate+192000*len(info['audio']))/8
+
+
 class ExportCancelled(Exception):
     pass
 
@@ -91,8 +120,10 @@ class VideoExport:
         if self.cancelled.is_set():
             raise ExportCancelled('Сохранение отменено. Исходное видео не изменено.')
 
-    def run(self, path, start, end, volume, expected, progress=lambda value: None):
+    def run(self, path, start, end, volume, expected, progress=lambda value: None, options=None):
         path = Path(path)
+        options = options or ExportOptions()
+        options.validate()
         if not all(math.isfinite(v) for v in (start, end, volume)) or start < 0 or end <= start or not 0 <= volume <= 2:
             raise ValueError('Проверьте начало, конец и громкость видео.')
         self.check_cancelled()
@@ -101,17 +132,25 @@ class VideoExport:
         info = probe(path)
         if end > info['duration'] + .05 or end-start < 1/30:
             raise ValueError('Выберите отрезок не короче одного кадра в пределах видео.')
-        width, height = (720, 1280) if info['height'] > info['width'] else (1280, 720)
+        width, height = options.dimensions(info)
         mux, codecs = encoding(path.suffix.lower())
+        if "-crf" in codecs:
+            codecs[codecs.index("-crf")+1] = str(({"high":18,"balanced":20,"compact":28} if mux != "webm" else {"high":24,"balanced":30,"compact":38})[options.quality])
+        if "-q:v" in codecs:
+            codecs[codecs.index("-q:v")+1] = str({"high":2,"balanced":3,"compact":7}[options.quality])
+        if mux == "asf":
+            codecs[codecs.index("-b:v")+1] = {"high":"8M","balanced":"5M","compact":"2M"}[options.quality]
         fd, name = tempfile.mkstemp(prefix='.mediacategorizer-video-', suffix='.part', dir=path.parent)
         os.close(fd)
         temporary = Path(name)
         try:
-            filters = f'scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30'
+            filters = f'scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1'
+            if options.fps:
+                filters += f',fps={options.fps}'
             args = [tool('ffmpeg'), '-hide_banner', '-nostdin', '-y', '-v', 'error', '-ss', f'{start:.6f}', '-i', str(path),
                     '-t', f'{end-start:.6f}', '-map', '0:' + str(info['stream']['index']), '-map', '0:a?',
                     '-vf', filters, '-af', f'volume={volume:.6f}', *codecs, '-pix_fmt', 'yuv420p',
-                    '-metadata:s:v:0', 'rotate=0', '-fps_mode', 'cfr', '-progress', 'pipe:1', '-nostats']
+                    '-metadata:s:v:0', 'rotate=0', '-fps_mode', 'cfr' if options.fps else 'vfr', '-progress', 'pipe:1', '-nostats']
             if mux in ('mp4', 'mov'):
                 args += ['-movflags', '+faststart']
             args += ['-f', mux, str(temporary)]
@@ -137,7 +176,7 @@ class VideoExport:
             progress(96)
             result = probe(temporary)
             fps = float(Fraction(result['stream']['avg_frame_rate']))
-            if (result['stream']['width'], result['stream']['height']) != (width, height) or abs(fps-30) > .01:
+            if (result['stream']['width'], result['stream']['height']) != (width, height) or (options.fps and abs(fps-options.fps) > .01):
                 raise OSError('Проверка готового видео не пройдена: разрешение или частота кадров.')
             if abs(result['duration']-(end-start)) > max(.25, (end-start)*.01) or len(result['audio']) != len(info['audio']):
                 raise OSError('Проверка длительности или звуковых дорожек не пройдена.')
