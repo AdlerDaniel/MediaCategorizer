@@ -119,6 +119,8 @@ class StartupUpdateTests(unittest.TestCase):
             with patch('media_categorizer.updates.subprocess.Popen') as launch:
                 dialog.install()
                 command = launch.call_args.args[0][-1]
+                self.assertEqual(launch.call_args.kwargs['env']['PYINSTALLER_RESET_ENVIRONMENT'], '1')
+                self.assertFalse(any(key.startswith('_PYI_') for key in launch.call_args.kwargs['env']))
                 script = base64.b64decode(command).decode('utf-16le')
                 self.assertIn('Wait-Process -Id', script)
                 self.assertIn('/SILENT', script)

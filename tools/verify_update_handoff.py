@@ -19,6 +19,7 @@ def child():
     from PySide6.QtWidgets import QApplication, QWidget
     from PySide6.QtCore import QTimer, Qt
     from media_categorizer.updates import UpdatePrompt
+    from unittest.mock import patch
     app = QApplication([])
     main = QWidget()
     main.settings = {}
@@ -31,8 +32,15 @@ def child():
     release = dict(version=APP_VERSION, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
     dialog = UpdatePrompt(main, release)
     dialog.downloaded = str(path)
-    QTimer.singleShot(100, dialog.install)
-    return app.exec()
+    # Simulate the stale onefile environment passed through an old updater client.
+    # The installer must reset it, even if the client has not received this fix yet.
+    target = sys.argv[sys.argv.index('--installed-exe')+1]
+    old_environment = dict(os.environ, _PYI_ARCHIVE_FILE=target,
+                           _PYI_PARENT_PROCESS_LEVEL='1', _PYI_APPLICATION_HOME_DIR='expired-runtime')
+    old_environment.pop('PYINSTALLER_RESET_ENVIRONMENT', None)
+    with patch('media_categorizer.updates.independent_environment', return_value=old_environment):
+        QTimer.singleShot(100, dialog.install)
+        return app.exec()
 
 def processes(executable):
     escaped = str(executable).replace("'", "''")
@@ -68,7 +76,7 @@ def main():
         baseline = ROOT/'dist/MediaCategorizer-Setup-6.0.0.exe'
         try:
             subprocess.run([str(baseline), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', '/TASKS=', '/DIR='+str(target)], env=env, check=True, timeout=60)
-            subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child'], env=env, check=True, timeout=30, creationflags=FLAGS)
+            subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child', '--installed-exe', str(executable)], env=env, check=True, timeout=30, creationflags=FLAGS)
             deadline = time.monotonic()+90
             pids = []
             while time.monotonic() < deadline:
@@ -91,7 +99,7 @@ def main():
             saved = json.loads(settings.read_text())
             assert saved['theme'] == 'light' and saved['categories'][0]['name'] == 'KEEP'
             assert journal.read_text() == '{"action":"sentinel"}\n'
-            print('Real handoff: 6.0.0 -> '+APP_VERSION+'; restarted; payload, settings and journal verified', flush=True)
+            print('Legacy frozen environment handoff: 6.0.0 -> '+APP_VERSION+'; restarted; payload, settings and journal verified', flush=True)
         finally:
             close_test_windows(processes(executable))
             uninstaller = target/'unins000.exe'

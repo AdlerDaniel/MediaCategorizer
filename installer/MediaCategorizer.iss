@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "6.2.0"
+#define AppVersion "6.2.1"
 #endif
 #define AppKey "Software\MediaCategorizer"
 #define UninstallKey "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaCategorizer_is1"
@@ -51,10 +51,18 @@ Name: "{group}\Media Categorizer"; Filename: "{app}\MediaCategorizer.exe"
 Name: "{autodesktop}\Media Categorizer"; Filename: "{app}\MediaCategorizer.exe"; Tasks: desktopicon
 #endif
 [Run]
-Filename: "{app}\MediaCategorizer.exe"; Description: "Запустить Media Categorizer"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\MediaCategorizer.exe"; Flags: nowait; Check: RestartAfterUpdate
+Filename: "{app}\MediaCategorizer.exe"; Description: "Запустить Media Categorizer"; Flags: nowait postinstall skipifsilent; BeforeInstall: PrepareAppEnvironment
+Filename: "{app}\MediaCategorizer.exe"; Flags: nowait; Check: RestartAfterUpdate; BeforeInstall: PrepareAppEnvironment
 [Code]
 var ExistingDir: String;
+function SetEnvironmentVariable(lpName, lpValue: String): Boolean;
+external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+procedure PrepareAppEnvironment();
+begin
+  { Also handles updates started by older clients that inherit _PYI_* variables. }
+  if not SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1') then
+    RaiseException('Не удалось подготовить окружение для запуска приложения.');
+end;
 function RestartAfterUpdate(): Boolean;
 begin
   Result := WizardSilent and (ExpandConstant('{param:RESTARTAPP|0}') = '1');

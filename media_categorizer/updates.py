@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, Q
 from .constants import APP_VERSION
 from .settings import app_config_dir
 from .ui import IconButton
+from .update_launch import independent_environment, installer_command, external_dll_search
 
 DEFAULT_REPOSITORY = 'AdlerDaniel/MediaCategorizer'
 
@@ -194,12 +195,13 @@ class UpdatesDialog(QDialog):
         if self.main.active_file_operation or self.main.file_operation_queue:
             QMessageBox.information(self, 'Обновление', 'Дождитесь завершения очереди операций.')
             return
-        escaped = self.downloaded.replace("'", "''")
-        script = f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; Start-Process -FilePath '{escaped}' -ArgumentList '/SILENT','/NORESTART','/RESTARTAPP=1'"
+        script = installer_command(self.downloaded)
         command = base64.b64encode(script.encode('utf-16le')).decode('ascii')
         powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
         try:
-            subprocess.Popen([str(powershell), '-NoProfile', '-EncodedCommand', command], creationflags=subprocess.CREATE_NO_WINDOW)
+            with external_dll_search():
+                subprocess.Popen([str(powershell), '-NoProfile', '-EncodedCommand', command],
+                                 env=independent_environment(), creationflags=subprocess.CREATE_NO_WINDOW)
         except OSError as exc:
             self.status.setText('Не удалось запустить обновление: ' + str(exc))
             return
