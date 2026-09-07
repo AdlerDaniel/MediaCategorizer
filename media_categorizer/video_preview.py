@@ -11,6 +11,7 @@ class VideoPreview(QGraphicsView):
         super().__init__(parent)
         self.info = info
         self.options = None
+        self.view_zoom = 1.
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         self.item = QGraphicsVideoItem()
@@ -19,6 +20,7 @@ class VideoPreview(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setMinimumSize(240, 110)
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.refresh_theme()
 
     def videoSink(self):
@@ -29,6 +31,10 @@ class VideoPreview(QGraphicsView):
 
     def set_options(self, options):
         self.options = options
+        self.update_geometry()
+
+    def set_zoom(self,value):
+        self.view_zoom = max(1.,min(8.,value))
         self.update_geometry()
 
     def update_geometry(self):
@@ -46,6 +52,7 @@ class VideoPreview(QGraphicsView):
             rect = QRectF(rect.center().x()-width/2, rect.center().y()-height/2, width, height)
         self.setSceneRect(rect)
         self.fitInView(rect, Qt.KeepAspectRatio)
+        self.scale(self.view_zoom,self.view_zoom)
         self.viewport().update()
 
     def drawForeground(self, painter, rect):

@@ -20,7 +20,7 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink, QtVideo
+from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink, QtVideo, QMediaDevices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -70,7 +70,8 @@ from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, Vi
 
 from media_categorizer.photo_editor import PhotoEditor
 from media_categorizer.video_editor import VideoEditor
-from media_categorizer.category_widgets import CategoryButton, CategoryStrip
+from media_categorizer.category_widgets import CategoryButton, CategoryStrip, CategoryScrollArea
+from media_categorizer.editor_widgets import ElidedLabel, PreviewHost
 from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon, COLORS, THEME_NAMES
 
 RESERVED_SHORTCUTS = {
@@ -987,6 +988,8 @@ class MediaCategorizer(QMainWindow):
 
         self.video_slots = [self._create_video_slot(i) for i in range(VIDEO_SLOT_COUNT)]
         self.active_video_slot = 0
+        self.media_devices = QMediaDevices(self)
+        self.media_devices.audioOutputsChanged.connect(self._refresh_audio_devices)
         self.timeline_dragging = False
         self._native_frame_guard = False
 
@@ -1004,7 +1007,9 @@ class MediaCategorizer(QMainWindow):
 
     # ---------- UI ----------
     def _build_ui(self):
-        self.progress_label = QLabel("0 / 0 • осталось: 0")
+        self.progress_label = ElidedLabel("0 / 0 • осталось: 0")
+        self.progress_label.setMinimumWidth(80)
+        self.progress_label.setMaximumWidth(220)
         self.progress_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.fullscreen_status_label = QLabel("0 / 0 • осталось: 0   •   F11 / Esc — выйти из полного экрана")
         self.fullscreen_status_label.setAlignment(Qt.AlignCenter)
@@ -1060,19 +1065,34 @@ class MediaCategorizer(QMainWindow):
         self.open_file_btn.clicked.connect(self.open_file)
         self.undo_btn.clicked.connect(self.undo_last_action)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
+        self.open_folder_btn.setText('Открыть')
+        self.open_folder_btn.clicked.disconnect(self.open_folder)
+        open_menu = QMenu(self.open_folder_btn)
+        for label,callback in (('Папку…',self.open_folder),('Файл…',self.open_file),('Последнюю папку',self.open_last_folder)):
+            open_menu.addAction(label).triggered.connect(callback)
+        self.open_folder_btn.setMenu(open_menu)
+        for button in (self.open_file_btn,self.last_folder_btn,self.fullscreen_btn):
+            button.setParent(self)
+            button.hide()
+        self.library_btn.compact = False
+        self.library_btn.setMinimumWidth(0)
+        self.library_btn.setMaximumWidth(16777215)
+        self.library_btn.setText('Библиотека')
+        self.theme_btn.setProperty('visibleLabel',None)
+        self.theme_btn.refresh_size()
         top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.addWidget(brand)
-        top_layout.addSpacing(18)
-        for button in (self.open_folder_btn, self.last_folder_btn, self.open_file_btn, self.library_btn, self.undo_btn):
+        top_layout.setContentsMargins(0,0,0,0)
+        brand.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred)
+        brand.setMinimumWidth(0)
+        top_layout.addWidget(brand,1)
+        for button in (self.open_folder_btn,self.library_btn,self.undo_btn):
             top_layout.addWidget(button)
         top_layout.addStretch()
         top_layout.addWidget(self.progress_label)
-        for button in (self.menu_btn, self.theme_btn, self.fullscreen_btn):
+        for button in (self.menu_btn,self.theme_btn):
             top_layout.addWidget(button)
         self.top_widget = QWidget()
         self.top_widget.setLayout(top_layout)
-        self.top_widget = self.scroll_toolbar(self.top_widget)
 
         self.multi_btn = ToggleSwitch("Несколько тегов")
         self.apply_tags_btn = IconButton("check", "Применить теги")
@@ -1113,25 +1133,29 @@ class MediaCategorizer(QMainWindow):
         self.zoom_slider.valueChanged.connect(self.set_zoom_percent)
 
         tools_layout = QHBoxLayout()
-        tools_layout.setContentsMargins(0, 0, 0, 0)
+        tools_layout.setContentsMargins(0,0,0,0)
         tools_layout.addWidget(self.multi_btn)
         tools_layout.addWidget(self.apply_tags_btn)
+        tools_layout.addStretch()
         tools_layout.addWidget(self.edit_photo_btn)
-        tools_layout.addWidget(self.rotate_left_btn)
-        tools_layout.addWidget(self.rotate_right_btn)
-        tools_layout.addSpacing(8)
-        tools_layout.addWidget(QLabel("Масштаб"))
-        tools_layout.addWidget(self.zoom_out_btn)
-        tools_layout.addWidget(self.zoom_slider)
-        tools_layout.addWidget(self.zoom_in_btn)
-        tools_layout.addWidget(self.zoom_reset_btn)
-        tools_layout.addSpacing(8)
-        tools_layout.addWidget(self.thumbnail_toggle_btn)
-        tools_layout.addWidget(self.properties_toggle_btn)
-        tools_layout.insertStretch(2)
+        self.view_menu_btn = IconButton('images','Просмотр')
+        view_menu = QMenu(self.view_menu_btn)
+        for label,callback in (('Вписать в окно',self.reset_zoom),('Увеличить',lambda:self.change_zoom(10)),('Уменьшить',lambda:self.change_zoom(-10)),('Повернуть влево',lambda:self.rotate_current_view(-90)),('Повернуть вправо',lambda:self.rotate_current_view(90)),('Полный экран',self.toggle_fullscreen)):
+            view_menu.addAction(label).triggered.connect(callback)
+        view_menu.addSeparator()
+        for button in (self.thumbnail_toggle_btn,self.properties_toggle_btn):
+            action = view_menu.addAction(button.toolTip())
+            action.setCheckable(True)
+            action.setChecked(button.isChecked())
+            action.toggled.connect(button.setChecked)
+            button.toggled.connect(action.setChecked)
+        self.view_menu_btn.setMenu(view_menu)
+        tools_layout.addWidget(self.view_menu_btn)
+        for button in (self.rotate_left_btn,self.rotate_right_btn,self.thumbnail_toggle_btn,self.properties_toggle_btn):
+            button.setParent(self)
+            button.hide()
         self.tools_widget = QWidget()
         self.tools_widget.setLayout(tools_layout)
-        self.tools_widget = self.scroll_toolbar(self.tools_widget)
 
         # V4.5: the media viewport is now a real expanding layout container.
         # In V4.4 the canvas geometry was assigned manually; on some Windows/Qt
@@ -1239,7 +1263,11 @@ class MediaCategorizer(QMainWindow):
         viewer_row = QHBoxLayout()
         viewer_row.setContentsMargins(0, 0, 0, 0)
         viewer_row.addWidget(self.left_nav_btn)
-        viewer_row.addWidget(self.media_stack, 1)
+        self.preview_host = PreviewHost(self.media_stack,(self.zoom_out_btn,self.zoom_slider,self.zoom_in_btn,self.zoom_reset_btn))
+        self.preview_host.full_button.clicked.disconnect()
+        self.preview_host.full_button.clicked.connect(self.toggle_fullscreen)
+        self.video_canvas.pointerMoved.connect(self.preview_host.reveal)
+        viewer_row.addWidget(self.preview_host, 1)
         viewer_row.addWidget(self.right_nav_btn)
 
         viewer_layout = QVBoxLayout()
@@ -1282,9 +1310,9 @@ class MediaCategorizer(QMainWindow):
         self.media_row_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.media_row_widget.setLayout(media_row)
 
-        self.filename_label = QLabel("")
+        self.filename_label = ElidedLabel("")
         self.filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.filename_label.setWordWrap(True)
+        self.filename_label.setWordWrap(False)
         self.tag_preview_label = QLabel("")
         self.tag_preview_label.setWordWrap(True)
 
@@ -1308,7 +1336,7 @@ class MediaCategorizer(QMainWindow):
         self.category_widget.reordered.connect(self.reorder_category)
         self.category_layout = QHBoxLayout(self.category_widget)
         self.category_layout.setContentsMargins(0, 0, 0, 0)
-        self.scroll = QScrollArea()
+        self.scroll = CategoryScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1831,9 +1859,29 @@ class MediaCategorizer(QMainWindow):
 
     def set_sound_enabled(self, enabled):
         self._refresh_toggle_labels()
-        for index, slot in enumerate(self.video_slots):
-            slot["audio"].setMuted(not enabled or index != self.active_video_slot)
+        self._sync_video_audio()
         self._persist_settings()
+
+    def _refresh_audio_devices(self):
+        device = QMediaDevices.defaultAudioOutput()
+        for slot in self.video_slots:
+            if slot['audio'].device() != device:
+                slot['audio'].setDevice(device)
+        self._sync_video_audio()
+
+    def _sync_video_audio(self):
+        if not hasattr(self, 'sound_btn'):
+            return
+        for index, slot in enumerate(self.video_slots):
+            active = index == self.active_video_slot and slot['path'] == self.current_file and not slot['preloading'] and slot['path'] is not None
+            player, audio = slot['player'], slot['audio']
+            audio.setMuted(not active or not self.sound_btn.isChecked())
+            audio.setVolume(1.)
+            if active:
+                if player.audioOutput() is not audio:
+                    player.setAudioOutput(audio)
+                if player.audioTracks() and player.activeAudioTrack() < 0:
+                    player.setActiveAudioTrack(0)
 
     def edit_categories(self):
         dialog = CategoriesDialog(self.categories, self)
@@ -2117,6 +2165,7 @@ class MediaCategorizer(QMainWindow):
     def _create_video_slot(self, index):
         player = QMediaPlayer(self)
         audio = QAudioOutput(self)
+        audio.setVolume(1.)
         audio.setMuted(True)
         player.setAudioOutput(audio)
         sink = QVideoSink(self)
@@ -2137,6 +2186,7 @@ class MediaCategorizer(QMainWindow):
         }
         sink.videoFrameChanged.connect(lambda frame, i=index: self._on_video_frame(i, frame))
         player.mediaStatusChanged.connect(lambda status, i=index: self._on_media_status(i, status))
+        player.tracksChanged.connect(self._sync_video_audio)
         player.positionChanged.connect(lambda pos, i=index: self._on_position_changed(i, pos))
         player.durationChanged.connect(lambda dur, i=index: self._on_duration_changed(i, dur))
         try:
@@ -2209,6 +2259,7 @@ class MediaCategorizer(QMainWindow):
         slot["player"].setPlaybackRate(float(self.speed_combo.currentData() or 1.0))
         slot["player"].setVideoOutput(self.video_canvas)
         slot["player"].setSource(QUrl.fromLocalFile(str(path)))
+        self._sync_video_audio()
         slot["player"].play()
 
     def _activate_preloaded_video(self, index, path: Path):
@@ -2221,6 +2272,11 @@ class MediaCategorizer(QMainWindow):
         slot["audio"].setMuted(not self.sound_btn.isChecked())
         slot["player"].setPlaybackRate(float(self.speed_combo.currentData() or 1.0))
         slot["player"].setVideoOutput(self.video_canvas)
+        # A preloader has already consumed media up to its first decoded frame.
+        # Reattach audio and rewind before playback, including very short clips.
+        slot["player"].setAudioOutput(slot['audio'])
+        slot["player"].setPosition(0)
+        self._sync_video_audio()
         self._refresh_slot_metadata_rotation(index)
         slot["player"].play()
         self._on_duration_changed(index, slot["player"].duration())
@@ -2238,6 +2294,7 @@ class MediaCategorizer(QMainWindow):
         slot["preloading"] = True
         slot["preview"] = QImage()
         slot["audio"].setMuted(True)
+        slot["player"].setAudioOutput(None)
         slot["player"].setVideoOutput(slot["sink"])
         slot["player"].setSource(QUrl.fromLocalFile(str(path)))
         slot["player"].play()
@@ -2387,6 +2444,8 @@ class MediaCategorizer(QMainWindow):
     def _on_media_status(self, index, status):
         if index != self.active_video_slot:
             return
+        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            self._sync_video_audio()
         if status == QMediaPlayer.MediaStatus.EndOfMedia and self.loop_btn.isChecked():
             slot = self.video_slots[index]
             if slot["path"] == self.current_file:
@@ -2415,6 +2474,8 @@ class MediaCategorizer(QMainWindow):
     def _on_playback_state_changed(self, index, state):
         if index != self.active_video_slot:
             return
+        if state == QMediaPlayer.PlayingState:
+            self._sync_video_audio()
         self.play_btn.set_playing(state == QMediaPlayer.PlaybackState.PlayingState)
 
     def _on_media_error(self, index, error, error_string):

@@ -2,11 +2,12 @@
 from pathlib import Path
 from fractions import Fraction
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QMediaDevices
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QDoubleSpinBox, QProgressBar, QMessageBox, QComboBox, QTabWidget, QWidget, QAbstractSpinBox
 from .ui import IconButton, ToggleSwitch
-from .ui import DecimalSpinBox as QDoubleSpinBox
+from .ui import TimeSpinBox as QDoubleSpinBox
 from .video_preview import VideoPreview
+from .editor_widgets import ToolPanel, RatioCards, PreviewHost, ElidedLabel, field
 from .video_export import VideoExport, ExportCancelled, ExportOptions, probe, signature
 from .timeline import RangeTimeline, TimelineAssets
 
@@ -46,6 +47,8 @@ class VideoEditor(QDialog):
         self.audio = QAudioOutput(self)
         self.audio.setVolume(.5)
         self.player.setAudioOutput(self.audio)
+        self.media_devices = QMediaDevices(self)
+        self.media_devices.audioOutputsChanged.connect(self.refresh_audio_device)
         self.video = VideoPreview(self.info)
         self.player.setVideoSink(self.video.videoSink())
         self.cuts = []
@@ -110,11 +113,30 @@ class VideoEditor(QDialog):
         self.progress.hide()
         self.start.valueChanged.connect(self.update_controls)
         self.end.valueChanged.connect(self.update_controls)
-        self.tabs = QTabWidget()
+        self.tabs = ToolPanel()
         self.build_edit_tools()
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel('Выберите отрезок и параметры экспорта. Сохранение заменит исходное видео.'))
-        layout.addWidget(self.video, 1)
+        header = QHBoxLayout()
+        title = ElidedLabel('Видео · '+self.path.name)
+        title.setObjectName('sectionTitle')
+        header.addWidget(title,1)
+        header.addWidget(self.reset_btn)
+        self.reset_btn.setProperty('destructive',True)
+        layout.addLayout(header)
+        self.view_zoom_label = QLabel('100%')
+        zoom_out, zoom_in = IconButton('minus','Уменьшить',compact=True), IconButton('plus','Увеличить',compact=True)
+        fit = IconButton('maximize','Вписать')
+        zoom_out.clicked.connect(lambda: self.set_view_zoom(self.video.view_zoom/1.25))
+        zoom_in.clicked.connect(lambda: self.set_view_zoom(self.video.view_zoom*1.25))
+        fit.clicked.connect(lambda: self.set_view_zoom(1))
+        self.preview_host = PreviewHost(self.video,(zoom_out,self.view_zoom_label,zoom_in,fit))
+        workspace = QHBoxLayout()
+        workspace.setContentsMargins(0,0,0,0)
+        workspace.addWidget(self.preview_host,1)
+        workspace.addWidget(self.tabs)
+        container = QWidget()
+        container.setLayout(workspace)
+        layout.addWidget(container,1)
         transport = QHBoxLayout()
         self.previous_frame = IconButton('step-back', 'Предыдущий кадр', compact=True)
         self.next_frame = IconButton('step-forward', 'Следующий кадр', compact=True)
@@ -138,19 +160,6 @@ class VideoEditor(QDialog):
         for widget in (QLabel('Масштаб'), self.zoom_slider, QLabel('Прокрутка'), self.pan_slider):
             zoom_row.addWidget(widget)
         layout.addLayout(zoom_row)
-        trim = QHBoxLayout()
-        for widget in (QLabel('Начало'), self.start, self.mark_start, QLabel('Конец'), self.end, self.mark_end):
-            trim.addWidget(widget)
-        self.trim_layout.insertLayout(0, trim)
-        sound = QHBoxLayout()
-        for widget in (QLabel('Громкость'), self.volume, self.volume_label, self.reset_btn):
-            sound.addWidget(widget)
-        self.sound_layout.addLayout(sound)
-        layout.addWidget(self.tabs)
-        options_row = QHBoxLayout()
-        for widget in (self.resolution, self.fps, self.quality, self.estimate):
-            options_row.addWidget(widget)
-        layout.addLayout(options_row)
         layout.addWidget(self.status)
         layout.addWidget(self.progress)
         footer = QHBoxLayout()
@@ -171,57 +180,88 @@ class VideoEditor(QDialog):
                              tuple(self.cuts), self.rotation.currentData(), self.mirror.isChecked(),
                              self.crop_ratio.currentData(), self.normalize.isChecked())
 
+    def refresh_audio_device(self):
+        device = QMediaDevices.defaultAudioOutput()
+        if self.audio.device() != device:
+            self.audio.setDevice(device)
+        self.audio.setMuted(False)
+        self.audio.setVolume(self.volume.value()/200)
+
+    def set_view_zoom(self,value):
+        self.video.set_zoom(value)
+        self.view_zoom_label.setText(f'{self.video.view_zoom*100:.0f}%')
+
     def build_edit_tools(self):
-        trim_tab, crop_tab, sound_tab = QWidget(), QWidget(), QWidget()
+        trim_tab,crop_tab,sound_tab,export_tab = QWidget(),QWidget(),QWidget(),QWidget()
         self.trim_layout = QVBoxLayout(trim_tab)
         self.sound_layout = QVBoxLayout(sound_tab)
-        crop_layout = QVBoxLayout(crop_tab)
-        for widget, label in ((trim_tab, 'Монтаж'), (crop_tab, 'Кадрирование'), (sound_tab, 'Звук')):
-            self.tabs.addTab(widget, label)
-        cut_row = QHBoxLayout()
-        self.cut_start, self.cut_end = QDoubleSpinBox(), QDoubleSpinBox()
-        for spin, label in ((self.cut_start, 'Начало удаляемого фрагмента'), (self.cut_end, 'Конец удаляемого фрагмента')):
-            spin.setRange(0, self.info['duration'])
+        crop_layout,export_layout = QVBoxLayout(crop_tab),QVBoxLayout(export_tab)
+        for widget,label in ((trim_tab,'Монтаж'),(crop_tab,'Кадрирование'),(sound_tab,'Звук'),(export_tab,'Экспорт')):
+            self.tabs.addTab(widget,label)
+        def timing(label,spin,button):
+            row = QHBoxLayout()
+            row.setContentsMargins(0,0,0,0)
+            button.compact = True
+            button.refresh_size()
+            row.addWidget(spin,1)
+            row.addWidget(button)
+            container = QWidget()
+            container.setLayout(row)
+            field(self.trim_layout,label,container)
+        timing('Начало диапазона',self.start,self.mark_start)
+        timing('Конец диапазона',self.end,self.mark_end)
+        self.cut_start,self.cut_end = QDoubleSpinBox(),QDoubleSpinBox()
+        for spin,label in ((self.cut_start,'Начало удаляемого фрагмента'),(self.cut_end,'Конец удаляемого фрагмента')):
+            spin.setRange(0,self.info['duration'])
             spin.setDecimals(6)
             spin.setSingleStep(1/self.frame_rate)
             spin.setButtonSymbols(QAbstractSpinBox.PlusMinus)
             spin.setSuffix(' с')
             spin.setAccessibleName(label)
-        self.cut_end.setValue(min(1, self.info['duration']))
-        cut_in = IconButton('step-forward', 'Отсюда', compact=False)
-        cut_out = IconButton('step-back', 'Досюда', compact=False)
-        cut_in.clicked.connect(lambda: self.cut_start.setValue(self.player.position()/1000))
-        cut_out.clicked.connect(lambda: self.cut_end.setValue(self.player.position()/1000))
-        self.add_cut_btn = IconButton('x', 'Вырезать')
+        self.cut_end.setValue(min(1,self.info['duration']))
+        cut_in,cut_out = IconButton('step-forward','Отсюда'),IconButton('step-back','Досюда')
+        cut_in.clicked.connect(lambda:self.cut_start.setValue(self.player.position()/1000))
+        cut_out.clicked.connect(lambda:self.cut_end.setValue(self.player.position()/1000))
+        timing('Удалить: от',self.cut_start,cut_in)
+        timing('До',self.cut_end,cut_out)
+        self.add_cut_btn = IconButton('x','Вырезать фрагмент')
+        self.add_cut_btn.setProperty('destructive',True)
         self.add_cut_btn.clicked.connect(self.add_cut)
+        self.trim_layout.addWidget(self.add_cut_btn)
         self.cut_list = QComboBox()
-        self.cut_list.setMinimumContentsLength(20)
-        restore = IconButton('undo-2', 'Вернуть')
+        self.cut_list.setMinimumContentsLength(10)
+        field(self.trim_layout,'Удалённые фрагменты',self.cut_list)
+        restore = IconButton('undo-2','Вернуть фрагмент')
         restore.clicked.connect(self.restore_cut)
-        for widget in (QLabel('Удалить'), self.cut_start, cut_in, self.cut_end, cut_out, self.add_cut_btn):
-            cut_row.addWidget(widget)
-        self.trim_layout.addLayout(cut_row)
-        cuts_row = QHBoxLayout()
-        cuts_row.addWidget(self.cut_list, 1)
-        cuts_row.addWidget(restore)
-        self.trim_layout.addLayout(cuts_row)
-        self.rotation, self.crop_ratio = QComboBox(), QComboBox()
-        for angle in (0, 90, 180, 270):
-            self.rotation.addItem(f'Поворот {angle}°', angle)
-        for label, value in (('Без обрезки', ''), ('16:9', '16:9'), ('9:16', '9:16'), ('Квадрат 1:1', '1:1')):
-            self.crop_ratio.addItem(label, value)
-        self.mirror = ToggleSwitch('Отражение по горизонтали')
-        framing = QHBoxLayout()
-        for widget in (self.rotation, self.crop_ratio, self.mirror):
-            framing.addWidget(widget)
-        crop_layout.addLayout(framing)
-        crop_layout.addWidget(QLabel('Обрезка по центру. Предпросмотр сверху показывает итоговое кадрирование.'))
-        crop_layout.addStretch()
-        self.normalize = ToggleSwitch('Выровнять громкость и ограничить пики')
+        self.trim_layout.addWidget(restore)
+        self.rotation,self.crop_ratio = QComboBox(),QComboBox()
+        for angle in (0,90,180,270):
+            self.rotation.addItem(f'{angle}°',angle)
+        for label,value in (('Исходный',''),('16:9','16:9'),('9:16','9:16'),('1:1','1:1')):
+            self.crop_ratio.addItem(label,value)
+        self.crop_ratio.setParent(self)
+        self.crop_ratio.hide()
+        self.ratio_cards = RatioCards(self.crop_ratio)
+        crop_layout.addWidget(self.ratio_cards)
+        field(crop_layout,'Поворот',self.rotation)
+        self.mirror = ToggleSwitch('Отразить ↔')
+        crop_layout.addWidget(self.mirror)
+        note = QLabel('Обрезка по центру. Предпросмотр показывает итоговую форму кадра.')
+        note.setWordWrap(True)
+        crop_layout.addWidget(note)
+        self.normalize = ToggleSwitch('Нормализация звука')
         self.sound_layout.addWidget(self.normalize)
-        note = QLabel('Нормализация применяется при сохранении: цель −16 LUFS, ограничение пиков.\nПредпросмотр воспроизводит исходный звук с выбранной ручной громкостью.')
+        field(self.sound_layout,'Громкость',self.volume)
+        self.sound_layout.addWidget(self.volume_label)
+        note = QLabel('Нормализация и ограничение пиков применяются при сохранении. Предпросмотр: исходный звук с ручной громкостью.')
         note.setWordWrap(True)
         self.sound_layout.addWidget(note)
+        for label,widget in (('Разрешение',self.resolution),('Частота кадров',self.fps),('Качество',self.quality)):
+            field(export_layout,label,widget)
+        export_layout.addWidget(self.estimate)
+        note = QLabel('Сохранение заменит исходное видео после проверки результата.')
+        note.setWordWrap(True)
+        export_layout.addWidget(note)
         self.rotation.currentIndexChanged.connect(self.update_controls)
         self.crop_ratio.currentIndexChanged.connect(self.update_controls)
         self.mirror.toggled.connect(self.update_controls)

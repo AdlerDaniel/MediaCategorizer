@@ -190,6 +190,7 @@ class ImageCanvas(PanZoomInput, QWidget):
 
 class VideoCanvas(PanZoomInput, QVideoWidget):
     zoomChanged = Signal(int)
+    pointerMoved = Signal()
 
     """Native Qt video surface with adaptive geometry.
 
@@ -283,6 +284,8 @@ class VideoCanvas(PanZoomInput, QVideoWidget):
             self._handle_wheel(event, (event.position().x(), event.position().y()))
             return True
         if self.isVisible() and self._owns_native_window(watched):
+            if event_type == QEvent.MouseMove:
+                self.pointerMoved.emit()
             if event_type == QEvent.Wheel:
                 point = self.parentWidget().mapFromGlobal(event.globalPosition().toPoint())
                 self._handle_wheel(event, (point.x(), point.y()))

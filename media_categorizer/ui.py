@@ -42,6 +42,11 @@ class IntegerSpinBox(SpinMarks, QSpinBox):
 class DecimalSpinBox(SpinMarks, QDoubleSpinBox):
     pass
 
+
+class TimeSpinBox(DecimalSpinBox):
+    def textFromValue(self,value):
+        return self.locale().toString(value,'f',3)
+
 NODES = json.loads((Path(__file__).parent / 'assets/icons.json').read_text())
 COLORS = {
     'dark': dict(bg='#11151d', panel='#1b2230', hover='#283449', text='#edf2fa', muted='#9aaac1', border='#344158', accent='#739cff', selected='#293f68', canvas='#0b1018'),
@@ -203,6 +208,11 @@ def apply_theme(theme, size=None, labels=None):
         QPushButton:focus { border: 2px solid %(accent)s; }
         QPushButton:disabled { color: %(muted)s; background: %(bg)s; }
         QPushButton[primary="true"] { background: %(selected)s; border-color: %(accent)s; font-weight: 600; }
+        QPushButton[destructive="true"] { border-style: dashed; color: %(text)s; }
+        QPushButton[destructive="true"]:hover { border-color: %(accent)s; background: %(selected)s; }
+        QLabel#sectionTitle { font-size: 16px; font-weight: 600; }
+        QFrame#floatingBar { background: %(panel)s; border: 1px solid %(border)s; border-radius: 12px; }
+        QStackedWidget#toolPanel { background: %(panel)s; border-radius: 10px; }
         QLabel#brand { font-size: 18px; font-weight: 650; }
         QLabel#muted { color: %(muted)s; }
         QGroupBox { background: %(panel)s; border: 1px solid %(border)s; border-radius: 10px; margin-top: 14px; padding: 16px 10px 10px; }

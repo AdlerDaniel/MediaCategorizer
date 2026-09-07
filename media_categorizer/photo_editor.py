@@ -4,9 +4,10 @@ import math
 from pathlib import Path
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QSaveFile, QIODevice, Signal
 from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPen, QTransform
-from PySide6.QtWidgets import QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
+from PySide6.QtWidgets import QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox, QGridLayout
 from .ui import IconButton, COLORS
 from .ui import IntegerSpinBox as QSpinBox, DecimalSpinBox as QDoubleSpinBox
+from .editor_widgets import ToolPanel, RatioCards, PreviewHost, ElidedLabel, field
 from PySide6.QtWidgets import QApplication
 
 
@@ -72,6 +73,9 @@ class CropCanvas(QWidget):
         self.zoom = 1.
         self.pan = QPointF()
         self.pan_start = None
+        self.guides = 'thirds'
+        self.horizon = 0.
+        self.horizon_visible = False
         self.setMinimumSize(320, 220)
         self.setCursor(Qt.CrossCursor)
         self.setAccessibleName('Область обрезки фотографии')
@@ -87,6 +91,18 @@ class CropCanvas(QWidget):
             self.pan = QPointF()
         self.update()
         self.zoomChanged.emit(self.zoom)
+
+    def set_guides(self, value):
+        self.guides = value
+        self.update()
+
+    def set_horizon(self, value):
+        self.horizon = value
+        self.update()
+
+    def set_horizon_visible(self, value):
+        self.horizon_visible = value
+        self.update()
 
     def wheelEvent(self, event):
         self.set_zoom(self.zoom*(1.25 if event.angleDelta().y() > 0 else .8))
@@ -199,9 +215,30 @@ class CropCanvas(QWidget):
             painter.drawRect(selected)
             for point in (selected.topLeft(), selected.topRight(), selected.bottomLeft(), selected.bottomRight()):
                 painter.fillRect(QRectF(point.x()-4, point.y()-4, 8, 8), QColor(c['accent']))
-            for part in (1/3, 2/3):
+            parts = {'thirds':(1/3,2/3),'center':(.5,),'dense':tuple(i/8 for i in range(1,8)),'none':()}[self.guides]
+            for part in parts:
                 painter.drawLine(QPointF(selected.x()+selected.width()*part, selected.top()), QPointF(selected.x()+selected.width()*part, selected.bottom()))
                 painter.drawLine(QPointF(selected.left(), selected.y()+selected.height()*part), QPointF(selected.right(), selected.y()+selected.height()*part))
+            label = f'{self.selection.width()} × {self.selection.height()} px'
+            width = self.fontMetrics().horizontalAdvance(label)+20
+            box = QRectF(max(4,min(self.width()-width-4,selected.center().x()-width/2)),max(4,min(self.height()-32,selected.bottom()-32)),width,26)
+            painter.fillRect(box,QColor(c['panel']))
+            painter.setPen(QColor(c['text']))
+            painter.drawText(box,Qt.AlignCenter,label)
+        if self.horizon_visible:
+            painter.save()
+            painter.translate(rect.center())
+            painter.rotate(self.horizon)
+            painter.setPen(QPen(QColor(c['accent']),2))
+            length = min(self.width()*.35,rect.width()*.45)
+            painter.drawLine(QPointF(-length,0),QPointF(length,0))
+            painter.drawLine(QPointF(0,-10),QPointF(0,10))
+            painter.restore()
+            label = f'{self.horizon:+.2f}°'
+            box = QRectF(rect.center().x()-45,rect.center().y()+16,90,28)
+            painter.fillRect(box,QColor(c['panel']))
+            painter.setPen(QColor(c['text']))
+            painter.drawText(box,Qt.AlignCenter,label)
         painter.end()
 
 
@@ -245,28 +282,7 @@ class PhotoEditor(QDialog):
         self.status = QLabel()
         hint = QLabel('Выделите мышью область для обрезки. Сохранение заменит исходное фото.')
         hint.setWordWrap(True)
-        layout = QVBoxLayout(self)
-        tools = QHBoxLayout()
-        for button in (self.flip_h_btn, self.flip_v_btn, self.crop_btn, self.reset_btn):
-            tools.addWidget(button)
-        tools.addStretch()
-        advanced = QHBoxLayout()
-        for widget in (QLabel("Пропорции"), self.aspect, self.rotate_left, self.rotate_right, self.undo_btn):
-            advanced.addWidget(widget)
-        advanced.addStretch()
-        precise = QHBoxLayout()
         self.crop_fields = []
-        for label in ('X', 'Y', 'Ширина', 'Высота'):
-            spin = QSpinBox()
-            spin.setButtonSymbols(QAbstractSpinBox.PlusMinus)
-            spin.setRange(0, 1000000)
-            spin.setSuffix(' px')
-            spin.setAccessibleName('Обрезка: '+label)
-            spin.valueChanged.connect(self.exact_crop)
-            precise.addWidget(QLabel(label))
-            precise.addWidget(spin)
-            self.crop_fields.append(spin)
-        view_row = QHBoxLayout()
         self.zoom_out = IconButton('minus', 'Уменьшить', compact=True)
         self.zoom_in = IconButton('plus', 'Увеличить', compact=True)
         self.zoom_fit = IconButton('maximize', 'Вписать')
@@ -277,25 +293,76 @@ class PhotoEditor(QDialog):
         self.canvas.zoomChanged.connect(lambda value: self.zoom_label.setText(f'{value*100:.0f}%'))
         self.angle = QDoubleSpinBox()
         self.angle.setButtonSymbols(QAbstractSpinBox.PlusMinus)
-        self.angle.setRange(-45, 45)
+        self.angle.setRange(-45,45)
         self.angle.setDecimals(2)
         self.angle.setSingleStep(.1)
         self.angle.setSuffix('°')
         self.angle.setAccessibleName('Угол выравнивания горизонта')
-        self.straighten_btn = IconButton('rotate-cw', 'Выровнять')
+        self.angle.valueChanged.connect(self.canvas.set_horizon)
+        self.straighten_btn = IconButton('rotate-cw','Выровнять')
         self.straighten_btn.clicked.connect(self.straighten)
-        for widget in (self.zoom_out, self.zoom_label, self.zoom_in, self.zoom_fit, QLabel('Горизонт'), self.angle, self.straighten_btn):
-            view_row.addWidget(widget)
-        hint.setText('Колесо — масштаб; Ctrl + перетаскивание — перемещение. Обрезка в пикселях текущего фото. Сохранение заменит исходник.')
-        layout.addLayout(tools)
-        layout.addLayout(advanced)
-        layout.addLayout(precise)
-        layout.addLayout(view_row)
+        self.guides = QComboBox()
+        for label, value in [('Трети','thirds'),('Центр','center'),('Частая сетка','dense'),('Без сетки','none')]:
+            self.guides.addItem(label,value)
+        self.guides.currentIndexChanged.connect(lambda: self.canvas.set_guides(self.guides.currentData()))
+        self.tools = ToolPanel()
+        crop_page, rotate_page, horizon_page = QWidget(), QWidget(), QWidget()
+        crop_layout, rotate_layout, horizon_layout = QVBoxLayout(crop_page), QVBoxLayout(rotate_page), QVBoxLayout(horizon_page)
+        self.aspect.setParent(self)
+        self.aspect.hide()
+        self.ratio_cards = RatioCards(self.aspect)
+        crop_layout.addWidget(self.ratio_cards)
+        coordinates = QGridLayout()
+        for i,label in enumerate(('X','Y','Ширина','Высота')):
+            spin = QSpinBox()
+            spin.setButtonSymbols(QAbstractSpinBox.PlusMinus)
+            spin.setRange(0,1000000)
+            spin.setSuffix(' px')
+            spin.setAccessibleName('Обрезка: '+label)
+            spin.valueChanged.connect(self.exact_crop)
+            coordinates.addWidget(QLabel(label),i,0)
+            coordinates.addWidget(spin,i,1)
+            self.crop_fields.append(spin)
+        crop_layout.addLayout(coordinates)
+        field(crop_layout,'Направляющие',self.guides)
+        crop_layout.addWidget(self.crop_btn)
+        for button in (self.flip_h_btn,self.flip_v_btn):
+            rotate_layout.addWidget(button)
+        rotations = QHBoxLayout()
+        rotations.addWidget(self.rotate_left)
+        rotations.addWidget(self.rotate_right)
+        rotate_layout.addLayout(rotations)
+        rotate_layout.addWidget(QLabel('Поворот на 90°'))
+        field(horizon_layout,'Угол горизонта',self.angle)
+        horizon_layout.addWidget(self.straighten_btn)
+        note = QLabel('Линия на фото показывает выбранный угол. После применения пустые углы обрезаются.')
+        note.setWordWrap(True)
+        horizon_layout.addWidget(note)
+        for page,label in ((crop_page,'Обрезка'),(rotate_page,'Поворот'),(horizon_page,'Горизонт')):
+            self.tools.addTab(page,label)
+        self.tools.currentChanged.connect(lambda index: self.canvas.set_horizon_visible(index==2))
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        title = ElidedLabel('Фото · '+self.path.name)
+        title.setObjectName('sectionTitle')
+        header.addWidget(title,1)
+        header.addWidget(self.undo_btn)
+        header.addWidget(self.reset_btn)
+        self.reset_btn.setProperty('destructive',True)
+        layout.addLayout(header)
+        workspace = QHBoxLayout()
+        self.preview_host = PreviewHost(self.canvas,(self.zoom_out,self.zoom_label,self.zoom_in,self.zoom_fit))
+        workspace.addWidget(self.preview_host,1)
+        workspace.addWidget(self.tools)
+        container = QWidget()
+        container.setLayout(workspace)
+        layout.addWidget(container,1)
+        hint.setText('Колесо — масштаб · Ctrl + перетаскивание — перемещение · Сохранение заменит исходное фото')
+        hint.setObjectName('muted')
         layout.addWidget(hint)
-        layout.addWidget(self.canvas, 1)
         footer = QHBoxLayout()
-        footer.addWidget(self.status)
-        footer.addStretch()
+        footer.addWidget(self.status,1)
         footer.addWidget(self.cancel_btn)
         footer.addWidget(self.save_btn)
         layout.addLayout(footer)
@@ -329,6 +396,7 @@ class PhotoEditor(QDialog):
         self.aspect.blockSignals(True)
         self.aspect.setCurrentIndex(0)
         self.aspect.blockSignals(False)
+        self.ratio_cards.sync()
         self.canvas.ratio = None
         self.canvas.selection = QRect(x, y, width, height)
         self.canvas.update()

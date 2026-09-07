@@ -1,9 +1,19 @@
-from PySide6.QtCore import Qt, QMimeData, Signal
+from PySide6.QtCore import Qt, QMimeData, Signal, QEvent
 from PySide6.QtGui import QDrag, QColor
-from PySide6.QtWidgets import QWidget, QApplication
+from PySide6.QtWidgets import QWidget, QApplication, QScrollArea
 from .ui import IconButton, COLORS
 
 MIME = 'application/x-mediacategorizer-category'
+
+
+class CategoryScrollArea(QScrollArea):
+    def focusNextPrevChild(self, next):
+        # QScrollArea calls ensureWidgetVisible even when disabling a button
+        # transfers focus automatically. Preserve position for that transfer.
+        focused = QApplication.focusWidget()
+        if focused is not None and not focused.isEnabled():
+            return QWidget.focusNextPrevChild(self, next)
+        return super().focusNextPrevChild(next)
 
 class CategoryButton(IconButton):
     def __init__(self, category, action_label, parent=None):
