@@ -954,6 +954,7 @@ class MediaCategorizer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
+        self.setAcceptDrops(True)
         self.setWindowIcon(QIcon(str(Path(__file__).parent / "media_categorizer/assets/app.ico")))
         self.resize(1400, 900)
 
@@ -989,13 +990,14 @@ class MediaCategorizer(QMainWindow):
         self.timeline_dragging = False
         self._native_frame_guard = False
 
-        apply_theme(self.settings.get("theme", "dark"))
+        apply_theme(self.settings.get("theme", "dark"), self.settings.get('ui_size', 'normal'), self.settings.get('icon_labels', False))
         self._build_ui()
         self._load_toggle_settings()
         self.build_category_buttons()
         self.create_global_shortcuts()
         self._update_last_folder_button()
         self.update_controls()
+        self.refresh_theme()
 
         if bool(self.settings.get("window_maximized", True)):
             QTimer.singleShot(0, self, self.showMaximized)
@@ -1045,10 +1047,14 @@ class MediaCategorizer(QMainWindow):
             button.setParent(self)
             button.hide()
         menu.addSeparator()
+        menu.addAction('Размер интерфейса и подписи').triggered.connect(self.edit_appearance)
         menu.addAction("О программе и обновления").triggered.connect(self.show_updates)
         self.menu_btn.setMenu(menu)
         self.library_btn = IconButton("images", "Библиотека и пакетная обработка", compact=True)
         self.library_btn.clicked.connect(self.open_library)
+        for button, label in ((self.last_folder_btn, 'Последняя папка'), (self.open_file_btn, 'Файл'), (self.library_btn, 'Библиотека'), (self.undo_btn, 'Отменить'), (self.theme_btn, 'Тема'), (self.fullscreen_btn, 'Полный экран')):
+            button.setProperty('visibleLabel', label)
+            button.refresh_size()
         self.open_folder_btn.clicked.connect(self.open_folder)
         self.last_folder_btn.clicked.connect(self.open_last_folder)
         self.open_file_btn.clicked.connect(self.open_file)
@@ -1066,6 +1072,7 @@ class MediaCategorizer(QMainWindow):
             top_layout.addWidget(button)
         self.top_widget = QWidget()
         self.top_widget.setLayout(top_layout)
+        self.top_widget = self.scroll_toolbar(self.top_widget)
 
         self.multi_btn = ToggleSwitch("Несколько тегов")
         self.apply_tags_btn = IconButton("check", "Применить теги")
@@ -1124,6 +1131,7 @@ class MediaCategorizer(QMainWindow):
         tools_layout.insertStretch(2)
         self.tools_widget = QWidget()
         self.tools_widget.setLayout(tools_layout)
+        self.tools_widget = self.scroll_toolbar(self.tools_widget)
 
         # V4.5: the media viewport is now a real expanding layout container.
         # In V4.4 the canvas geometry was assigned manually; on some Windows/Qt
@@ -1338,6 +1346,60 @@ class MediaCategorizer(QMainWindow):
 
     def toggle_theme(self):
         self.set_theme("light" if QApplication.instance().property("theme") != "light" else "dark")
+
+    def scroll_toolbar(self, content):
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        area.setWidget(content)
+        area.setMinimumWidth(0)
+        return area
+
+    def refresh_theme(self):
+        from media_categorizer.ui import ui_scale
+        if hasattr(self, 'tools_widget'):
+            for area in (self.top_widget, self.tools_widget):
+                if isinstance(area, QScrollArea):
+                    area.widget().layout().invalidate()
+                    area.setFixedHeight(max(round(54*ui_scale()), area.widget().sizeHint().height()+round(16*ui_scale())))
+        if isinstance(getattr(self, 'scroll', None), QScrollArea):
+            self.scroll.setFixedHeight(round(84*ui_scale()))
+
+    def edit_appearance(self):
+        from media_categorizer.appearance import AppearanceDialog
+        AppearanceDialog(self).exec()
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and not self.active_file_operation and not self.file_operation_queue:
+            if any(url.isLocalFile() and (Path(url.toLocalFile()).is_dir() or Path(url.toLocalFile()).suffix.lower() in SUPPORTED_EXTENSIONS) for url in event.mimeData().urls()):
+                event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        if self.active_file_operation or self.file_operation_queue:
+            event.ignore()
+            return
+        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        try:
+            files = self.dropped_files(paths)
+            if files:
+                self.open_library_selection(files, files[0], files[0].parent)
+                event.acceptProposedAction()
+            else:
+                QMessageBox.information(self, APP_NAME, 'В выбранных файлах и папках нет поддерживаемых фото или видео.')
+        except OSError as exc:
+            QMessageBox.warning(self, APP_NAME, 'Не удалось открыть файлы: '+str(exc))
+
+    @staticmethod
+    def dropped_files(paths):
+        from media_categorizer.file_operations import path_key
+        result = {}
+        for path in paths:
+            candidates = sorted(path.iterdir(), key=lambda p: p.name.casefold()) if path.is_dir() else [path]
+            for candidate in candidates:
+                if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    result[path_key(candidate)] = candidate
+        return list(result.values())
 
     def set_theme(self, theme):
         theme = theme if theme in COLORS else "dark"
@@ -1601,7 +1663,8 @@ class MediaCategorizer(QMainWindow):
             dialog = VideoEditor(path, self)
             if dialog.exec() == QDialog.Accepted:
                 self.thumbnail_cache.pop(str(path), None)
-                self.append_log('EDIT_VIDEO', path, path, detail='Обрезка и громкость; 720p / 30 fps')
+                options = dialog.options()
+                self.append_log('EDIT_VIDEO', path, path, detail=f'Монтаж; {options.resolution} / {options.fps or "исходная частота"} fps; удалено фрагментов: {len(options.cuts)}; поворот: {options.rotation}°; отражение: {options.mirror}; кадр: {options.crop_ratio or "исходный"}; нормализация: {options.normalize}')
         except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, 'Редактор видео', str(exc))
         finally:
@@ -1632,7 +1695,7 @@ class MediaCategorizer(QMainWindow):
                 image = read_oriented_image(path)
                 self._cache_image(path, image)
                 self._cache_thumbnail(path, image)
-                self.append_log('EDIT', path, path, detail='Отражение / обрезка; исходное фото заменено')
+                self.append_log('EDIT', path, path, detail='Правки фото / обрезка / поворот; исходное фото заменено')
                 if self.current_file == path:
                     self.show_current_file()
         except (OSError, ValueError) as exc:

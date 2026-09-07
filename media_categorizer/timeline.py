@@ -52,6 +52,7 @@ class TimelineAssets(QThread):
 class RangeTimeline(QWidget):
     rangeChanged = Signal(float, float)
     seekRequested = Signal(int)
+    viewChanged = Signal()
 
     def __init__(self, duration, parent=None):
         super().__init__(parent)
@@ -59,16 +60,37 @@ class RangeTimeline(QWidget):
         self.start, self.end, self.position = 0., self.duration, 0.
         self.images, self.waveform = [], QImage()
         self.mode = None
-        self.setMinimumHeight(152)
+        self.zoom = 1.
+        self.offset = 0.
+        self.frame_rate = 30.
+        self.cuts = ()
+        self.setMinimumHeight(120)
         self.setMinimumWidth(320)
         self.setAccessibleName('Диапазон обрезки видео; точные границы доступны в полях начала и конца')
         self.setToolTip('Перетащите левую или правую границу. Щелчок внутри шкалы — переход к кадру.')
 
     def x(self, seconds):
-        return 12+(self.width()-24)*seconds/self.duration
+        return 12+(self.width()-24)*(seconds-self.offset)/(self.duration/self.zoom)
 
     def seconds(self, x):
-        return max(0, min(self.duration, (x-12)/max(1,self.width()-24)*self.duration))
+        value = max(0, min(self.duration, self.offset+(x-12)/max(1,self.width()-24)*self.duration/self.zoom))
+        return min(self.duration, round(value*self.frame_rate)/self.frame_rate)
+
+    def set_zoom(self, zoom, anchor=None):
+        anchor = self.position if anchor is None else anchor
+        fraction = (anchor-self.offset)/(self.duration/self.zoom)
+        self.zoom = max(1., min(64., zoom))
+        self.offset = max(0., min(self.duration-self.duration/self.zoom, anchor-fraction*self.duration/self.zoom))
+        self.update()
+        self.viewChanged.emit()
+
+    def set_offset(self, fraction):
+        self.offset = fraction*max(0, self.duration-self.duration/self.zoom)
+        self.update()
+
+    def wheelEvent(self, event):
+        self.set_zoom(self.zoom*(1.5 if event.angleDelta().y() > 0 else 1/1.5), self.seconds(event.position().x()))
+        event.accept()
 
     def set_range(self, start, end):
         self.start, self.end = start, end
@@ -76,6 +98,9 @@ class RangeTimeline(QWidget):
 
     def set_position(self, value):
         self.position = value/1000
+        if not self.offset <= self.position <= self.offset+self.duration/self.zoom:
+            self.offset = max(0, min(self.duration-self.duration/self.zoom, self.position-self.duration/self.zoom/2))
+            self.viewChanged.emit()
         self.update()
 
     def mousePressEvent(self, event):
@@ -95,9 +120,9 @@ class RangeTimeline(QWidget):
             return
         seconds = self.seconds(event.position().x())
         if self.mode == 'start':
-            self.start = min(seconds, max(0,self.end-1/30))
+            self.start = min(seconds, max(0,self.end-1/self.frame_rate))
         elif self.mode == 'end':
-            self.end = max(seconds, min(self.duration,self.start+1/30))
+            self.end = max(seconds, min(self.duration,self.start+1/self.frame_rate))
         else:
             self.seekRequested.emit(round(seconds*1000))
             return
@@ -111,29 +136,40 @@ class RangeTimeline(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         c = COLORS[QApplication.instance().property('theme') or 'dark']
-        area = QRectF(12, 8, self.width()-24, 120)
+        area = QRectF(12, 8, self.width()-24, self.height()-32)
+        bottom, height = area.bottom(), area.height()
+        thumb_height = min(64., height*.55)
+        painter.setClipRect(area.adjusted(-5, -3, 5, 4))
         painter.fillRect(area, QColor(c['canvas']))
         if self.images:
-            width = area.width()/len(self.images)
+            width = area.width()*self.zoom/len(self.images)
             for index, image in enumerate(self.images):
-                painter.drawImage(QRectF(area.x()+index*width, 8, width, 64), image)
+                painter.drawImage(QRectF(self.x(0)+index*width, 8, width, thumb_height), image)
         if not self.waveform.isNull():
             wave = self.waveform.copy()
             tint = QPainter(wave)
             tint.setCompositionMode(QPainter.CompositionMode_SourceIn)
             tint.fillRect(wave.rect(), QColor(c['accent']))
             tint.end()
-            painter.drawImage(QRectF(12, 74, area.width(), 52), wave)
+            painter.drawImage(QRectF(self.x(0), 10+thumb_height, area.width()*self.zoom, max(1,height-thumb_height-2)), wave)
+        for a, b in self.cuts:
+            cut = QRectF(self.x(a), 8, self.x(b)-self.x(a), height)
+            painter.fillRect(cut, QColor(0, 0, 0, 195))
+            painter.setPen(QPen(QColor(c['muted']), 1, Qt.DashLine))
+            painter.drawRect(cut)
+            if cut.width() > 60:
+                painter.drawText(cut, Qt.AlignCenter, 'Удалить')
         left, right = self.x(self.start), self.x(self.end)
-        painter.fillRect(QRectF(12,8,max(0,left-12),120), QColor(0,0,0,145))
-        painter.fillRect(QRectF(right,8,max(0,self.width()-12-right),120), QColor(0,0,0,145))
+        painter.fillRect(QRectF(12,8,max(0,left-12),height), QColor(0,0,0,145))
+        painter.fillRect(QRectF(right,8,max(0,self.width()-12-right),height), QColor(0,0,0,145))
         painter.setPen(QPen(QColor(c['accent']), 2))
-        painter.drawRect(QRectF(left,8,max(0,right-left),120))
+        painter.drawRect(QRectF(left,8,max(0,right-left),height))
         for x in (left,right):
-            painter.fillRect(QRectF(x-4,8,8,120), QColor(c['accent']))
+            painter.fillRect(QRectF(x-4,8,8,height), QColor(c['accent']))
         painter.setPen(QPen(QColor(c['text']), 2))
-        painter.drawLine(round(self.x(self.position)), 6, round(self.x(self.position)), 130)
+        painter.drawLine(round(self.x(self.position)), 6, round(self.x(self.position)), round(bottom+2))
+        painter.setClipping(False)
         painter.setPen(QColor(c['text']))
-        painter.drawText(12,146,f'{self.start:.3f} с')
-        painter.drawText(self.width()-110,146,f'{self.end:.3f} с')
+        painter.drawText(12,self.height()-6,f'{self.offset:.3f} с')
+        painter.drawText(self.width()-110,self.height()-6,f'{self.offset+self.duration/self.zoom:.3f} с')
         painter.end()

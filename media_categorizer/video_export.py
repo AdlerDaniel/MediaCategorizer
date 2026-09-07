@@ -75,18 +75,55 @@ class ExportOptions:
     resolution: str = '720'
     fps: int = 30
     quality: str = 'balanced'
+    cuts: tuple = ()
+    rotation: int = 0
+    mirror: bool = False
+    crop_ratio: str = ''
+    normalize: bool = False
+
+    def geometry(self, info):
+        width, height = info['width'], info['height']
+        if self.rotation % 180:
+            width, height = height, width
+        if self.crop_ratio:
+            a, b = map(int, self.crop_ratio.split(':'))
+            width, height = min(width, height*a/b), min(height, width*b/a)
+        return max(2, int(width)//2*2), max(2, int(height)//2*2)
+
+    def segments(self, start, end):
+        cursor, result = start, []
+        for left, right in sorted(self.cuts):
+            if left >= end or right <= start:
+                continue
+            left, right = max(start, left), min(end, right)
+            if right <= cursor:
+                continue
+            if left > cursor:
+                result.append((cursor, left))
+            cursor = max(cursor, right)
+        if cursor < end:
+            result.append((cursor, end))
+        return [(a, b) for a, b in result if b-a >= .001]
 
     def dimensions(self, info):
+        source_width, source_height = self.geometry(info)
         if self.resolution == 'source':
-            return max(2, round(info['width']/2)*2), max(2, round(info['height']/2)*2)
+            return source_width, source_height
         if self.resolution not in ('720', '1080'):
             raise ValueError('Неизвестное разрешение.')
         short, long = (720, 1280) if self.resolution == '720' else (1080, 1920)
-        return (short, long) if info['height'] > info['width'] else (long, short)
+        if self.crop_ratio == '1:1':
+            return short, short
+        return (short, long) if source_height > source_width else (long, short)
 
     def validate(self):
         if self.fps not in (0, 24, 25, 30, 60) or self.quality not in ('high', 'balanced', 'compact'):
             raise ValueError('Неверные параметры экспорта.')
+        if self.rotation not in (0, 90, 180, 270) or self.crop_ratio not in ('', '16:9', '9:16', '1:1'):
+            raise ValueError('Неверные параметры кадрирования.')
+        for left, right in self.cuts:
+            if not all(math.isfinite(v) for v in (left, right)) or left < 0 or right <= left:
+                raise ValueError('Неверные границы удаляемого фрагмента.')
 
     def estimate_bytes(self, info, duration):
         width, height = self.dimensions(info)
@@ -133,6 +170,10 @@ class VideoExport:
         if end > info['duration'] + .05 or end-start < 1/30:
             raise ValueError('Выберите отрезок не короче одного кадра в пределах видео.')
         width, height = options.dimensions(info)
+        segments = options.segments(start, end)
+        duration = sum(b-a for a, b in segments)
+        if duration < 1/30:
+            raise ValueError('После удаления фрагментов должен остаться хотя бы один кадр.')
         mux, codecs = encoding(path.suffix.lower())
         if "-crf" in codecs:
             codecs[codecs.index("-crf")+1] = str(({"high":18,"balanced":20,"compact":28} if mux != "webm" else {"high":24,"balanced":30,"compact":38})[options.quality])
@@ -144,12 +185,46 @@ class VideoExport:
         os.close(fd)
         temporary = Path(name)
         try:
-            filters = f'scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1'
+            filters = 'scale=trunc(iw*sar/2)*2:ih,setsar=1'
+            if options.rotation == 90:
+                filters += ',transpose=clock'
+            elif options.rotation == 180:
+                filters += ',hflip,vflip'
+            elif options.rotation == 270:
+                filters += ',transpose=cclock'
+            if options.mirror:
+                filters += ',hflip'
+            if options.crop_ratio:
+                cw, ch = options.geometry(info)
+                filters += f',crop={cw}:{ch}:(iw-ow)/2:(ih-oh)/2'
+            filters += f',scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1'
             if options.fps:
                 filters += f',fps={options.fps}'
+            graph, inputs = [], []
+            count, audio_count = len(segments), len(info['audio'])
+            # Independent trim branches preserve every audio stream, including silent videos.
+            streams = [('v', info['stream']['index'])] + [('a'+str(i), s['index']) for i, s in enumerate(info['audio'])]
+            for kind, index in streams:
+                split = 'split' if kind == 'v' else 'asplit'
+                if count > 1:
+                    graph.append(f'[0:{index}]{split}={count}' + ''.join(f'[{kind}src{i}]' for i in range(count)))
+                for i, (left, right) in enumerate(segments):
+                    source = f'{kind}src{i}' if count > 1 else f'0:{index}'
+                    trim, pts = ('trim', 'setpts') if kind == 'v' else ('atrim', 'asetpts')
+                    graph.append(f'[{source}]{trim}=start={left-start:.6f}:end={right-start:.6f},{pts}=PTS-STARTPTS[{kind}seg{i}]')
+            for i in range(count):
+                inputs.extend([f'[vseg{i}]'] + [f'[a{j}seg{i}]' for j in range(audio_count)])
+            graph.append(''.join(inputs) + f'concat=n={count}:v=1:a={audio_count}[joinedv]' + ''.join(f'[joineda{j}]' for j in range(audio_count)))
+            graph.append(f'[joinedv]{filters}[outv]')
+            maps = ['-map', '[outv]']
+            for j in range(audio_count):
+                sound = ('loudnorm=I=-16:TP=-1.5:LRA=11,' if options.normalize else '') + f'volume={volume:.6f}'
+                if options.normalize:
+                    sound += ',alimiter=limit=0.89:level=false:latency=true'
+                graph.append(f'[joineda{j}]{sound}[outa{j}]')
+                maps += ['-map', f'[outa{j}]']
             args = [tool('ffmpeg'), '-hide_banner', '-nostdin', '-y', '-v', 'error', '-ss', f'{start:.6f}', '-i', str(path),
-                    '-t', f'{end-start:.6f}', '-map', '0:' + str(info['stream']['index']), '-map', '0:a?',
-                    '-vf', filters, '-af', f'volume={volume:.6f}', *codecs, '-pix_fmt', 'yuv420p',
+                    '-t', f'{duration:.6f}', '-filter_complex', ';'.join(graph), *maps, *codecs, '-pix_fmt', 'yuv420p',
                     '-metadata:s:v:0', 'rotate=0', '-fps_mode', 'cfr' if options.fps else 'vfr', '-progress', 'pipe:1', '-nostats']
             if mux in ('mp4', 'mov'):
                 args += ['-movflags', '+faststart']
@@ -163,7 +238,7 @@ class VideoExport:
                 for line in self.process.stdout:
                     if line.startswith('out_time_us='):
                         try:
-                            progress(min(95, max(0, int(float(line.split('=')[1]) / ((end-start)*1000000)*95))))
+                            progress(min(95, max(0, int(float(line.split('=')[1]) / (duration*1000000)*95))))
                         except ValueError:
                             pass
                 code = self.process.wait()
@@ -178,7 +253,7 @@ class VideoExport:
             fps = float(Fraction(result['stream']['avg_frame_rate']))
             if (result['stream']['width'], result['stream']['height']) != (width, height) or (options.fps and abs(fps-options.fps) > .01):
                 raise OSError('Проверка готового видео не пройдена: разрешение или частота кадров.')
-            if abs(result['duration']-(end-start)) > max(.25, (end-start)*.01) or len(result['audio']) != len(info['audio']):
+            if abs(result['duration']-duration) > max(.25, duration*.01) or len(result['audio']) != len(info['audio']):
                 raise OSError('Проверка длительности или звуковых дорожек не пройдена.')
             self.check_cancelled()
             if signature(path) != expected:

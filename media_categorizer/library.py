@@ -2,9 +2,9 @@
 import os
 from pathlib import Path
 from datetime import datetime
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import QThread, QTimer, QItemSelectionModel, QItemSelection
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog)
+    QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QApplication)
 from .constants import SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS
 from .file_operations import path_key
 from .video_export import probe
@@ -17,8 +17,10 @@ def processed_paths(records):
             for value in (record.get('source'), record.get('result')) if value}
 
 
-def scan_files(folder, recursive=False, durations=False, cancelled=lambda: False):
+def scan_files(folder, recursive=False, durations=False, cancelled=lambda: False, cache=None):
     records = []
+    cache = cache if cache is not None else {}
+    live = set()
     for base, directories, names in os.walk(folder, followlinks=False):
         directories[:] = sorted(d for d in directories if not Path(base, d).is_symlink()) if recursive else []
         for name in names:
@@ -31,15 +33,22 @@ def scan_files(folder, recursive=False, durations=False, cancelled=lambda: False
                 stat = path.stat()
                 video = path.suffix.lower() in VIDEO_EXTENSIONS
                 duration = None
+                key = (str(path), stat.st_size, stat.st_mtime_ns)
+                live.add(key)
                 if video and durations:
                     try:
-                        duration = probe(path)['duration']
+                        if key not in cache:
+                            cache[key] = probe(path)['duration']
+                        duration = cache[key]
                     except (OSError, ValueError):
-                        pass
+                        cache[key] = None
                 records.append(dict(path=path, size=stat.st_size, date=stat.st_mtime,
-                                    video=video, duration=duration))
+                                    video=video, duration=duration, identity=(stat.st_dev, stat.st_ino)))
             except OSError:
                 continue
+    for key in list(cache):
+        if key not in live:
+            del cache[key]
     return records
 
 
@@ -55,14 +64,15 @@ def filter_records(records, query='', kind='all', sort='name', processed=()):
 
 
 class ScanThread(QThread):
-    def __init__(self, folder, recursive, durations, parent):
+    def __init__(self, folder, recursive, durations, parent, cache=None):
         super().__init__(parent)
         self.folder, self.recursive, self.durations = folder, recursive, durations
         self.records, self.error = [], ''
+        self.cache = cache
 
     def run(self):
         try:
-            self.records = scan_files(self.folder, self.recursive, self.durations, self.isInterruptionRequested)
+            self.records = scan_files(self.folder, self.recursive, self.durations, self.isInterruptionRequested, self.cache)
         except Exception as exc:
             self.error = str(exc)
 
@@ -74,6 +84,8 @@ class LibraryDialog(QDialog):
         self.folder = Path(main.settings.get('last_folder') or Path.home())
         self.records, self.visible = [], []
         self.worker, self.close_pending = None, False
+        self.duration_cache = {}
+        self.background_scan = False
         self.processed = processed_paths(main.load_log_records(limit=1000000))
         self.setWindowTitle('Библиотека файлов')
         self.resize(1060, 700)
@@ -132,7 +144,16 @@ class LibraryDialog(QDialog):
         self.open_btn.clicked.connect(self.open_selection)
         self.batch_btn.clicked.connect(self.batch)
         self.close_btn.clicked.connect(self.reject)
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(2000)
+        self.refresh_timer.timeout.connect(self.auto_refresh)
+        self.refresh_timer.start()
         QTimer.singleShot(0, self.scan)
+
+    def auto_refresh(self):
+        # Poll in a worker: handles network folders and newly created nested folders too.
+        if self.isVisible() and not self.worker and QApplication.activeModalWidget() in (None, self):
+            self.scan(background=True)
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, 'Папка библиотеки', str(self.folder))
@@ -146,19 +167,24 @@ class LibraryDialog(QDialog):
         else:
             self.render()
 
-    def scan(self):
+    def scan(self, *args, background=False):
         if self.worker:
             return
         self.folder_label.setText(str(self.folder))
-        for w in (self.choose_btn, self.refresh_btn, self.recursive, self.sort, self.open_btn, self.batch_btn):
+        self.background_scan = background
+        for w in (self.choose_btn, self.refresh_btn, self.recursive, self.sort):
             w.setEnabled(False)
-        self.status.setText('Чтение файлов…' if self.sort.currentData() != 'duration' else 'Чтение длительности видео…')
-        self.worker = ScanThread(self.folder, self.recursive.isChecked(), self.sort.currentData() == 'duration', self)
+        if not background:
+            self.open_btn.setEnabled(False)
+            self.batch_btn.setEnabled(False)
+            self.status.setText('Чтение файлов…' if self.sort.currentData() != 'duration' else 'Чтение длительности видео…')
+        self.worker = ScanThread(self.folder, self.recursive.isChecked(), self.sort.currentData() == 'duration', self, self.duration_cache)
         self.worker.finished.connect(self.scanned)
         self.worker.start()
 
     def scanned(self):
         worker, self.worker = self.worker, None
+        changed = self.records != worker.records
         self.records = worker.records
         error = worker.error
         worker.deleteLater()
@@ -167,11 +193,17 @@ class LibraryDialog(QDialog):
             return
         for w in (self.choose_btn, self.refresh_btn, self.recursive, self.sort):
             w.setEnabled(True)
-        self.render()
+        if changed or not self.background_scan:
+            self.render()
+        else:
+            self.selection_changed()
         if error:
             self.status.setText('Ошибка чтения: ' + error)
 
     def render(self):
+        chosen = {path_key(path) for path in self.selected()}
+        identities = {r.get('identity') for r in self.visible if path_key(r['path']) in chosen and r.get('identity', (0, 0))[1]}
+        scroll = self.table.verticalScrollBar().value()
         self.visible = filter_records(self.records, self.search.text(), self.kind.currentData(), self.sort.currentData(), self.processed)
         self.table.blockSignals(True)
         self.table.clearSelection()
@@ -186,6 +218,12 @@ class LibraryDialog(QDialog):
                 item = QTableWidgetItem(value)
                 item.setToolTip(str(record['path']))
                 self.table.setItem(row, col, item)
+        selection = QItemSelection()
+        for row, record in enumerate(self.visible):
+            if path_key(record['path']) in chosen or record.get('identity') in identities:
+                selection.select(self.table.model().index(row, 0), self.table.model().index(row, 4))
+        self.table.selectionModel().select(selection, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self.table.verticalScrollBar().setValue(scroll)
         self.table.blockSignals(False)
         self.selection_changed()
 
@@ -205,6 +243,10 @@ class LibraryDialog(QDialog):
             self.main.open_library_selection([r['path'] for r in self.visible], selected[0], self.folder)
             self.accept()
 
+    def done(self, result):
+        self.refresh_timer.stop()
+        super().done(result)
+
     def batch(self):
         paths = self.selected()
         if paths and self.worker is None:
@@ -213,6 +255,7 @@ class LibraryDialog(QDialog):
             self.scan()
 
     def reject(self):
+        self.refresh_timer.stop()
         if self.worker:
             self.close_pending = True
             self.worker.requestInterruption()

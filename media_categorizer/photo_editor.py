@@ -4,8 +4,9 @@ import math
 from pathlib import Path
 from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QSaveFile, QIODevice, Signal
 from PySide6.QtGui import QColor, QImage, QImageReader, QImageWriter, QPainter, QPen, QTransform
-from PySide6.QtWidgets import QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QComboBox
+from PySide6.QtWidgets import QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
 from .ui import IconButton, COLORS
+from .ui import IntegerSpinBox as QSpinBox, DecimalSpinBox as QDoubleSpinBox
 from PySide6.QtWidgets import QApplication
 
 
@@ -58,6 +59,7 @@ def replace_photo(path, image, fmt, expected):
 
 class CropCanvas(QWidget):
     selectionChanged = Signal()
+    zoomChanged = Signal(float)
 
     def __init__(self, image, parent=None):
         super().__init__(parent)
@@ -67,14 +69,28 @@ class CropCanvas(QWidget):
         self.ratio = None
         self.drag_mode = "new"
         self.drag_rect = QRect()
+        self.zoom = 1.
+        self.pan = QPointF()
+        self.pan_start = None
         self.setMinimumSize(320, 220)
         self.setCursor(Qt.CrossCursor)
         self.setAccessibleName('Область обрезки фотографии')
 
     def image_rect(self):
-        scale = min(self.width() / self.image.width(), self.height() / self.image.height())
+        scale = min(self.width() / self.image.width(), self.height() / self.image.height())*self.zoom
         width, height = self.image.width() * scale, self.image.height() * scale
-        return QRectF((self.width()-width)/2, (self.height()-height)/2, width, height)
+        return QRectF((self.width()-width)/2+self.pan.x(), (self.height()-height)/2+self.pan.y(), width, height)
+
+    def set_zoom(self, value):
+        self.zoom = max(1., min(16., value))
+        if self.zoom == 1:
+            self.pan = QPointF()
+        self.update()
+        self.zoomChanged.emit(self.zoom)
+
+    def wheelEvent(self, event):
+        self.set_zoom(self.zoom*(1.25 if event.angleDelta().y() > 0 else .8))
+        event.accept()
 
     def source_point(self, point):
         rect = self.image_rect()
@@ -97,6 +113,10 @@ class CropCanvas(QWidget):
             self.update()
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier):
+            self.pan_start = event.position()
+            event.accept()
+            return
         if event.button() != Qt.LeftButton or not self.image_rect().contains(event.position()):
             return
         point = self.source_point(event.position())
@@ -122,6 +142,15 @@ class CropCanvas(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event):
+        if self.pan_start is not None:
+            self.pan += event.position()-self.pan_start
+            self.pan_start = event.position()
+            # Keep at least the image center reachable; Fit always resets panning.
+            rect = self.image_rect()
+            self.pan.setX(max(-rect.width()/2, min(rect.width()/2, self.pan.x())))
+            self.pan.setY(max(-rect.height()/2, min(rect.height()/2, self.pan.y())))
+            self.update()
+            return
         if self.start is None:
             return
         end = self.source_point(event.position())
@@ -146,6 +175,9 @@ class CropCanvas(QWidget):
         self.selectionChanged.emit()
 
     def mouseReleaseEvent(self, event):
+        if self.pan_start is not None:
+            self.pan_start = None
+            return
         if event.button() == Qt.LeftButton and self.start is not None:
             self.mouseMoveEvent(event)
             self.start = None
@@ -222,8 +254,43 @@ class PhotoEditor(QDialog):
         for widget in (QLabel("Пропорции"), self.aspect, self.rotate_left, self.rotate_right, self.undo_btn):
             advanced.addWidget(widget)
         advanced.addStretch()
+        precise = QHBoxLayout()
+        self.crop_fields = []
+        for label in ('X', 'Y', 'Ширина', 'Высота'):
+            spin = QSpinBox()
+            spin.setButtonSymbols(QAbstractSpinBox.PlusMinus)
+            spin.setRange(0, 1000000)
+            spin.setSuffix(' px')
+            spin.setAccessibleName('Обрезка: '+label)
+            spin.valueChanged.connect(self.exact_crop)
+            precise.addWidget(QLabel(label))
+            precise.addWidget(spin)
+            self.crop_fields.append(spin)
+        view_row = QHBoxLayout()
+        self.zoom_out = IconButton('minus', 'Уменьшить', compact=True)
+        self.zoom_in = IconButton('plus', 'Увеличить', compact=True)
+        self.zoom_fit = IconButton('maximize', 'Вписать')
+        self.zoom_label = QLabel('100%')
+        self.zoom_out.clicked.connect(lambda: self.canvas.set_zoom(self.canvas.zoom/1.25))
+        self.zoom_in.clicked.connect(lambda: self.canvas.set_zoom(self.canvas.zoom*1.25))
+        self.zoom_fit.clicked.connect(lambda: self.canvas.set_zoom(1))
+        self.canvas.zoomChanged.connect(lambda value: self.zoom_label.setText(f'{value*100:.0f}%'))
+        self.angle = QDoubleSpinBox()
+        self.angle.setButtonSymbols(QAbstractSpinBox.PlusMinus)
+        self.angle.setRange(-45, 45)
+        self.angle.setDecimals(2)
+        self.angle.setSingleStep(.1)
+        self.angle.setSuffix('°')
+        self.angle.setAccessibleName('Угол выравнивания горизонта')
+        self.straighten_btn = IconButton('rotate-cw', 'Выровнять')
+        self.straighten_btn.clicked.connect(self.straighten)
+        for widget in (self.zoom_out, self.zoom_label, self.zoom_in, self.zoom_fit, QLabel('Горизонт'), self.angle, self.straighten_btn):
+            view_row.addWidget(widget)
+        hint.setText('Колесо — масштаб; Ctrl + перетаскивание — перемещение. Обрезка в пикселях текущего фото. Сохранение заменит исходник.')
         layout.addLayout(tools)
         layout.addLayout(advanced)
+        layout.addLayout(precise)
+        layout.addLayout(view_row)
         layout.addWidget(hint)
         layout.addWidget(self.canvas, 1)
         footer = QHBoxLayout()
@@ -243,6 +310,47 @@ class PhotoEditor(QDialog):
         self.reset_btn.setEnabled(self.dirty or selected)
         size = selection.size() if selected else self.canvas.image.size()
         self.status.setText(('Выделено: ' if selected else 'Размер: ') + f'{size.width()} × {size.height()} px')
+        if hasattr(self, 'crop_fields'):
+            rect = selection if selected else self.canvas.image.rect()
+            for spin in self.crop_fields:
+                spin.blockSignals(True)
+            w, h = self.canvas.image.width(), self.canvas.image.height()
+            for spin, maximum, value in zip(self.crop_fields, (w-1, h-1, w-rect.x(), h-rect.y()), (rect.x(), rect.y(), rect.width(), rect.height())):
+                spin.setMaximum(maximum)
+                spin.setValue(value)
+                spin.blockSignals(False)
+
+    def exact_crop(self):
+        if len(self.crop_fields) != 4:
+            return
+        x, y, width, height = [spin.value() for spin in self.crop_fields]
+        width = max(1, min(width, self.canvas.image.width()-x))
+        height = max(1, min(height, self.canvas.image.height()-y))
+        self.aspect.blockSignals(True)
+        self.aspect.setCurrentIndex(0)
+        self.aspect.blockSignals(False)
+        self.canvas.ratio = None
+        self.canvas.selection = QRect(x, y, width, height)
+        self.canvas.update()
+        self.update_controls()
+
+    def straighten(self):
+        angle = self.angle.value()
+        if not angle:
+            return
+        self.remember()
+        source = self.canvas.image
+        rotated = source.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+        # Largest centered rectangle of the original aspect entirely inside the rotated image.
+        radians = math.radians(abs(angle))
+        w, h = source.width(), source.height()
+        factor = min(w/(w*math.cos(radians)+h*math.sin(radians)), h/(w*math.sin(radians)+h*math.cos(radians)))
+        cw, ch = max(1, int(w*factor)-2), max(1, int(h*factor)-2)
+        self.canvas.image = rotated.copy((rotated.width()-cw)//2, (rotated.height()-ch)//2, cw, ch)
+        self.dirty = True
+        self.canvas.set_zoom(1)
+        self.canvas.clear_selection()
+        self.angle.setValue(0)
 
     def remember(self):
         self.history.append(QImage(self.canvas.image))

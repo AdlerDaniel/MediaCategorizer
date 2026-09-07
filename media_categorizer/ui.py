@@ -1,12 +1,46 @@
 """Shared Lucide controls and application-wide light/dark appearance."""
 import json
 import sys
+import re
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 from PySide6.QtCore import Qt, QSize, QRectF, QEvent, QObject
 from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap, QFont
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget, QSpinBox, QDoubleSpinBox, QStyleOptionSpinBox, QStyle, QAbstractSpinBox
+
+UI_SIZES = {'compact': ('Компактный', .9), 'normal': ('Обычный', 1.), 'large': ('Крупный', 1.2)}
+
+def ui_scale():
+    return UI_SIZES.get(QApplication.instance().property('ui_size'), UI_SIZES['normal'])[1]
+
+
+class SpinMarks:
+    """Draw legible step marks when Qt's stylesheet omits native spin glyphs."""
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        option = QStyleOptionSpinBox()
+        self.initStyleOption(option)
+        painter = QPainter(self)
+        c = COLORS[QApplication.instance().property('theme') or 'dark']
+        radius = max(3, round(3*ui_scale()))
+        for control, flag, plus in ((QStyle.SC_SpinBoxUp, QAbstractSpinBox.StepUpEnabled, True),
+                                    (QStyle.SC_SpinBoxDown, QAbstractSpinBox.StepDownEnabled, False)):
+            rect = self.style().subControlRect(QStyle.CC_SpinBox, option, control, self)
+            center = rect.center()
+            painter.setPen(QColor(c['text'] if self.isEnabled() and self.stepEnabled() & flag else c['muted']))
+            painter.drawLine(center.x()-radius, center.y(), center.x()+radius, center.y())
+            if plus:
+                painter.drawLine(center.x(), center.y()-radius, center.x(), center.y()+radius)
+        painter.end()
+
+
+class IntegerSpinBox(SpinMarks, QSpinBox):
+    pass
+
+
+class DecimalSpinBox(SpinMarks, QDoubleSpinBox):
+    pass
 
 NODES = json.loads((Path(__file__).parent / 'assets/icons.json').read_text())
 COLORS = {
@@ -57,6 +91,8 @@ class IconButton(QPushButton):
     def __init__(self, name, label, parent=None, compact=False):
         super().__init__('' if compact else label, parent)
         self.icon_name = name
+        self.compact = compact
+        self.label = label
         self.setToolTip(label)
         self.setAccessibleName(label)
         self.setCursor(Qt.PointingHandCursor)
@@ -65,9 +101,24 @@ class IconButton(QPushButton):
             self.setFixedSize(38, 38)
         self.refresh_icon()
 
+    def refresh_size(self):
+        factor = ui_scale()
+        self.setIconSize(QSize(round(20*factor), round(20*factor)))
+        if self.compact:
+            label = self.property('visibleLabel')
+            show = bool(label and QApplication.instance().property('icon_labels'))
+            self.setText(str(label) if show else '')
+            self.setFixedHeight(round(38*factor))
+            if show:
+                self.setMinimumWidth(0)
+                self.setMaximumWidth(16777215)
+            else:
+                self.setFixedWidth(round(38*factor))
+
     def refresh_icon(self):
         theme = QApplication.instance().property('theme') or 'dark'
         self.setIcon(icon(self.icon_name, COLORS[theme]['text']))
+        self.refresh_size()
 
     def set_playing(self, playing):
         self.icon_name = 'pause' if playing else 'play'
@@ -81,7 +132,7 @@ class ToggleSwitch(QPushButton):
         super().__init__(text, parent)
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(round(38*ui_scale()))
         self.toggled.connect(self.update)
 
     def event(self, event):
@@ -91,29 +142,37 @@ class ToggleSwitch(QPushButton):
         return super().event(event)
 
     def sizeHint(self):
-        return QSize(self.fontMetrics().horizontalAdvance(self.text()) + 66, 38)
+        return QSize(self.fontMetrics().horizontalAdvance(self.text()) + round(66*ui_scale()), round(38*ui_scale()))
 
     def paintEvent(self, event):
         c = COLORS[QApplication.instance().property('theme') or 'dark']
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        factor = ui_scale()
+        painter.scale(factor, factor)
+        height = self.height()/factor
         if not self.isEnabled():
             painter.setOpacity(.4)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(c['accent'] if self.isChecked() else c['border']))
-        painter.drawRoundedRect(QRectF(4, (self.height()-22)/2, 38, 22), 11, 11)
+        painter.drawRoundedRect(QRectF(4, (height-22)/2, 38, 22), 11, 11)
         painter.setBrush(QColor(c['bg'] if self.isChecked() else c['text']))
-        painter.drawEllipse(QRectF(24 if self.isChecked() else 8, (self.height()-14)/2, 14, 14))
+        painter.drawEllipse(QRectF(24 if self.isChecked() else 8, (height-14)/2, 14, 14))
+        painter.resetTransform()
         painter.setPen(QColor(c['text']))
-        painter.drawText(self.rect().adjusted(52, 0, -4, 0), Qt.AlignVCenter, self.text())
+        painter.drawText(self.rect().adjusted(round(52*factor), 0, -4, 0), Qt.AlignVCenter, self.text())
         if self.hasFocus():
             painter.setPen(QColor(c['accent']))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 6, 6)
         painter.end()
 
-def apply_theme(theme):
+def apply_theme(theme, size=None, labels=None):
     app = QApplication.instance()
+    if size is not None:
+        app.setProperty('ui_size', size if size in UI_SIZES else 'normal')
+    if labels is not None:
+        app.setProperty('icon_labels', bool(labels))
     app.setAttribute(Qt.AA_DontUseNativeDialogs, True)
     theme = theme if theme in COLORS else 'dark'
     app.setProperty('theme', theme)
@@ -121,7 +180,7 @@ def apply_theme(theme):
         app._theme_windows = ThemeWindows(app)
         app.installEventFilter(app._theme_windows)
     app.setStyle('Fusion')
-    app.setFont(QFont('Segoe UI', 10))
+    app.setFont(QFont('Segoe UI', round(10*ui_scale())))
     c = COLORS[theme]
     palette = QPalette()
     for role, key in [(QPalette.Window,'bg'), (QPalette.WindowText,'text'), (QPalette.Base,'panel'), (QPalette.AlternateBase,'bg'), (QPalette.Text,'text'), (QPalette.Button,'panel'), (QPalette.ButtonText,'text'), (QPalette.Highlight,'accent'), (QPalette.HighlightedText,'panel'), (QPalette.ToolTipBase,'panel'), (QPalette.ToolTipText,'text')]:
@@ -135,7 +194,7 @@ def apply_theme(theme):
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor(c['muted']))
     palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(c['muted']))
     app.setPalette(palette)
-    app.setStyleSheet('''
+    stylesheet = '''
         QWidget { color: %(text)s; font-family: "Segoe UI"; font-size: 13px; }
         QMainWindow, QDialog { background: %(bg)s; }
         QPushButton { background: %(panel)s; border: 1px solid %(border)s; border-radius: 8px; padding: 8px 12px; }
@@ -152,6 +211,8 @@ def apply_theme(theme):
         QTextEdit, QPlainTextEdit, QAbstractItemView { background: %(panel)s; alternate-background-color: %(bg)s; border: 1px solid %(border)s; selection-background-color: %(selected)s; selection-color: %(text)s; }
         QComboBox QAbstractItemView { background: %(panel)s; selection-background-color: %(selected)s; selection-color: %(text)s; }
         QComboBox::drop-down { border: none; width: 20px; }
+        QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 20px; background: %(hover)s; border-left: 1px solid %(border)s; }
+        QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover { background: %(selected)s; }
         QMenu { background: %(panel)s; border: 1px solid %(border)s; padding: 6px; }
         QMenu::item { padding: 9px 24px; border-radius: 5px; }
         QMenu::item:selected { background: %(selected)s; }
@@ -170,10 +231,17 @@ def apply_theme(theme):
         QProgressBar { border: none; border-radius: 4px; background: %(border)s; text-align: center; max-height: 18px; }
         QProgressBar::chunk { background: %(selected)s; border: 1px solid %(accent)s; border-radius: 4px; }
         QToolTip { background: %(panel)s; color: %(text)s; border: 1px solid %(border)s; padding: 6px; }
-    ''' % c)
+        QTabWidget::pane { border: 1px solid %(border)s; background: %(bg)s; }
+        QTabBar::tab { background: %(panel)s; color: %(muted)s; padding: 8px 16px; border-bottom: 2px solid %(border)s; }
+        QTabBar::tab:selected { background: %(selected)s; color: %(text)s; border-color: %(accent)s; }
+    ''' % c
+    app.setStyleSheet(re.sub(r'(\d+)px', lambda m: str(max(1, round(int(m[1])*ui_scale())))+'px', stylesheet))
     for widget in app.allWidgets():
         if isinstance(widget, IconButton):
             widget.refresh_icon()
+        if isinstance(widget, ToggleSwitch):
+            widget.setMinimumHeight(round(38*ui_scale()))
+            widget.updateGeometry()
         theme_window_frame(widget)
         if hasattr(widget, 'refresh_theme'):
             widget.refresh_theme()
