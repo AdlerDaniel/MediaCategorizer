@@ -1,10 +1,10 @@
 VSVersionInfo(
-  ffi=FixedFileInfo(filevers=(6, 5, 0, 0), prodvers=(6, 5, 0, 0), mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0,0)),
+  ffi=FixedFileInfo(filevers=(6, 5, 1, 0), prodvers=(6, 5, 1, 0), mask=0x3f, flags=0, OS=0x40004, fileType=1, subtype=0, date=(0,0)),
   kids=[StringFileInfo([StringTable('040904B0', [
     StringStruct('FileDescription', 'Media Categorizer'),
-    StringStruct('FileVersion', '6.5.0'),
+    StringStruct('FileVersion', '6.5.1'),
     StringStruct('ProductName', 'Media Categorizer'),
-    StringStruct('ProductVersion', '6.5.0'),
+    StringStruct('ProductVersion', '6.5.1'),
     StringStruct('OriginalFilename', 'MediaCategorizer.exe')
   ])]), VarFileInfo([VarStruct('Translation', [1033,1200])])]
 )

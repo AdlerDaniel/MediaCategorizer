@@ -160,18 +160,19 @@ class PreviewHost(QWidget):
         self.fullscreen = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0,0,0,0)
-        layout.addWidget(preview)
+        layout.addWidget(preview,1)
         self.bar = QFrame(self)
         self.bar.setObjectName('floatingBar' if floating else 'editorBar')
         self.bar.setAttribute(Qt.WA_TranslucentBackground, floating)
         if not floating:
+            self.bar.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Fixed)
             layout.addWidget(self.bar)
         row = QHBoxLayout(self.bar)
         row.setContentsMargins(9,6,9,6)
         row.setSpacing(5)
         if not floating: row.addStretch()
         for widget in controls:
-            if not floating: widget.setSizePolicy(QSizePolicy.Maximum,QSizePolicy.Preferred)
+            if not floating: widget.setSizePolicy(QSizePolicy.Maximum,QSizePolicy.Fixed)
             row.addWidget(widget)
         self.full_button = IconButton('maximize','Полный экран предпросмотра',compact=True)
         self.full_button.clicked.connect(self.toggle_fullscreen)
