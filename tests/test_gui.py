@@ -250,7 +250,7 @@ class WindowTests(unittest.TestCase):
     def send_wheel(self, canvas, local, delta=120):
         event = QWheelEvent(QPointF(local), QPointF(canvas.mapToGlobal(local)), QPoint(), QPoint(0, delta),
                             Qt.NoButton, Qt.NoModifier, Qt.ScrollUpdate, False)
-        self.app.sendEvent(canvas, event)
+        self.app.sendEvent(canvas.viewport() if hasattr(canvas,"viewport") else canvas, event)
         self.app.processEvents()
 
     def test_photo_wheel_anchor_drag_and_reset(self):

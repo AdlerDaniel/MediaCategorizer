@@ -115,18 +115,19 @@ class Release63Tests(unittest.TestCase):
         try:
             editor.range_timeline.set_position(1000)
             editor.range_timeline.set_zoom(8)
-            self.assertEqual(editor.zoom_slider.value(), 8)
-            editor.pan_slider.setValue(500)
+            self.assertEqual(editor.range_timeline.zoom, 8)
+            editor.range_timeline.set_offset(.5)
             self.assertGreater(editor.range_timeline.offset, 0)
-            editor.cut_start.setValue(.5)
-            editor.cut_end.setValue(1.5)
-            editor.add_cut()
+            editor.splits=[.5,1.5]
+            editor.refresh_cuts()
+            editor.range_timeline.selected=1
+            editor.remove_fragment()
             self.assertEqual(editor.options().segments(0,3), [(0,.5),(1.5,3)])
             editor.rotation.setCurrentIndex(1)
             editor.crop_ratio.setCurrentIndex(2)
             self.assertLess(editor.video.sceneRect().width(), editor.video.sceneRect().height())
             self.assertAlmostEqual(editor.start.singleStep(), 1/30)
-            editor.restore_cut()
+            editor.undo_montage()
             self.assertEqual(editor.cuts, [])
         finally:
             editor.reject()

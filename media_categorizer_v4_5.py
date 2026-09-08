@@ -2257,7 +2257,7 @@ class MediaCategorizer(QMainWindow):
         slot["preview"] = QImage()
         slot["audio"].setMuted(not self.sound_btn.isChecked())
         slot["player"].setPlaybackRate(float(self.speed_combo.currentData() or 1.0))
-        slot["player"].setVideoOutput(self.video_canvas)
+        slot["player"].setVideoOutput(slot["sink"])
         slot["player"].setSource(QUrl.fromLocalFile(str(path)))
         self._sync_video_audio()
         slot["player"].play()
@@ -2271,7 +2271,7 @@ class MediaCategorizer(QMainWindow):
         slot["preloading"] = False
         slot["audio"].setMuted(not self.sound_btn.isChecked())
         slot["player"].setPlaybackRate(float(self.speed_combo.currentData() or 1.0))
-        slot["player"].setVideoOutput(self.video_canvas)
+        slot["player"].setVideoOutput(slot["sink"])
         # A preloader has already consumed media up to its first decoded frame.
         # Reattach audio and rewind before playback, including very short clips.
         slot["player"].setAudioOutput(slot['audio'])
@@ -2385,30 +2385,20 @@ class MediaCategorizer(QMainWindow):
             self._corrected_rotation_for_frame(slot, frame)
         slot["observed_rotation"] = observed_total
         slot["display_rotation"] = desired_total
-        self.video_canvas.set_video_geometry(size, desired_total - self.video_canvas.manual_rotation)
+        self.video_canvas.set_video_geometry(size, desired_total - self.video_canvas.manual_rotation, observed_total)
 
-        # If a mobile video keeps rotation only in metadata, or the user pressed
-        # one of the manual View buttons, alter presentation metadata on a shared
-        # QVideoFrame copy. Pixel data stays on the native Qt video path.
-        if desired_frame_rotation != frame_rotation:
-            try:
-                corrected = QVideoFrame(frame)
-                if set_video_frame_rotation(corrected, desired_frame_rotation):
-                    self._native_frame_guard = True
-                    try:
-                        self.video_canvas.videoSink().setVideoFrame(corrected)
-                    finally:
-                        self._native_frame_guard = False
-            except Exception:
-                pass
+        corrected = QVideoFrame(frame)
+        self._native_frame_guard = True
+        try:
+            self.video_canvas.videoSink().setVideoFrame(corrected)
+        finally:
+            self._native_frame_guard = False
 
         # Generate at most one thumbnail image. The old V4.1 converted every
         # frame to QImage; on 4K/60fps media that was the main CPU bottleneck.
         if str(slot["path"]) not in self.thumbnail_cache:
             try:
                 thumb_frame = QVideoFrame(frame)
-                if desired_frame_rotation != frame_rotation:
-                    set_video_frame_rotation(thumb_frame, desired_frame_rotation)
                 image = oriented_video_frame_image(thumb_frame)
                 if not image.isNull():
                     self._cache_thumbnail(slot["path"], image)
@@ -2416,7 +2406,10 @@ class MediaCategorizer(QMainWindow):
                 pass
 
     def _on_video_frame(self, index, frame):
-        """Frames from inactive preloader slots only."""
+        """Forward active frames once; inactive frames only populate the preload cache."""
+        if index == self.active_video_slot and not self.video_slots[index].get("preloading"):
+            self._on_active_native_video_frame(frame)
+            return
         slot = self.video_slots[index]
         if slot["path"] is None or not slot.get("preloading"):
             return
@@ -2560,7 +2553,7 @@ class MediaCategorizer(QMainWindow):
             # A few phone containers publish rotation only after metadata is
             # parsed. Re-present the current frame with that correction.
             try:
-                frame = self.video_canvas.videoSink().videoFrame()
+                frame = self.video_slots[self.active_video_slot]["sink"].videoFrame()
                 if frame.isValid():
                     self._on_active_native_video_frame(frame)
             except Exception:
@@ -2706,7 +2699,7 @@ class MediaCategorizer(QMainWindow):
                 slot = self.video_slots[self.active_video_slot]
                 slot["preloading"] = False
                 slot["audio"].setMuted(not self.sound_btn.isChecked())
-                slot["player"].setVideoOutput(self.video_canvas)
+                slot["player"].setVideoOutput(slot["sink"])
                 self._refresh_slot_metadata_rotation(self.active_video_slot)
                 slot["player"].play()
             else:
@@ -2745,7 +2738,7 @@ class MediaCategorizer(QMainWindow):
         else:
             self.video_canvas.rotate_view(degrees)
             try:
-                frame = self.video_canvas.videoSink().videoFrame()
+                frame = self.video_slots[self.active_video_slot]["sink"].videoFrame()
                 if frame.isValid():
                     self._on_active_native_video_frame(frame)
             except Exception:

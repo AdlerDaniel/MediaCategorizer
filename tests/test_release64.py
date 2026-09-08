@@ -93,6 +93,7 @@ class Interface64Tests(unittest.TestCase):
         editor.preview_host.toggle_fullscreen()
         self.app.processEvents()
         self.assertIs(editor.preview_host.parentWidget(),parent)
+        editor.undo()
         editor.canvas.clear_selection()
         editor.reject()
 
@@ -108,7 +109,7 @@ class Interface64Tests(unittest.TestCase):
         self.app.processEvents()
         host.effect.setOpacity(0)
         host.finish_fade()
-        self.assertTrue(host.bar.isHidden())
+        self.assertFalse(host.bar.isHidden())
         host.reveal()
         self.assertFalse(host.bar.isHidden())
         self.assertEqual(host.effect.opacity(),1)

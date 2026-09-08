@@ -80,12 +80,15 @@ class ExportOptions:
     mirror: bool = False
     crop_ratio: str = ''
     normalize: bool = False
+    crop_rect: tuple = ()
 
     def geometry(self, info):
         width, height = info['width'], info['height']
         if self.rotation % 180:
             width, height = height, width
-        if self.crop_ratio:
+        if self.crop_rect:
+            width, height = width*self.crop_rect[2], height*self.crop_rect[3]
+        elif self.crop_ratio:
             a, b = map(int, self.crop_ratio.split(':'))
             width, height = min(width, height*a/b), min(height, width*b/a)
         return max(2, int(width)//2*2), max(2, int(height)//2*2)
@@ -112,11 +115,30 @@ class ExportOptions:
         if self.resolution not in ('720', '1080'):
             raise ValueError('Неизвестное разрешение.')
         short, long = (720, 1280) if self.resolution == '720' else (1080, 1920)
+        if self.crop_rect:
+            scale=min(long/max(source_width,source_height),short/min(source_width,source_height))
+            return max(2,int(source_width*scale)//2*2),max(2,int(source_height*scale)//2*2)
         if self.crop_ratio == '1:1':
             return short, short
         return (short, long) if source_height > source_width else (long, short)
 
+    def crop_geometry(self, info):
+        width,height = info['width'],info['height']
+        if self.rotation % 180: width,height = height,width
+        cw,ch = self.geometry(info)
+        if self.crop_rect:
+            x,y = int(width*self.crop_rect[0])//2*2,int(height*self.crop_rect[1])//2*2
+        else:
+            x,y = int((width-cw)/2)//2*2,int((height-ch)/2)//2*2
+        return cw,ch,x,y
+
     def validate(self):
+        if self.crop_rect:
+            if len(self.crop_rect)!=4 or not all(math.isfinite(v) for v in self.crop_rect):
+                raise ValueError('Неверная рамка кадрирования.')
+            x,y,w,h=self.crop_rect
+            if min(x,y)<0 or min(w,h)<=0 or x+w>1.000001 or y+h>1.000001:
+                raise ValueError('Рамка выходит за границы видео.')
         if self.fps not in (0, 24, 25, 30, 60) or self.quality not in ('high', 'balanced', 'compact'):
             raise ValueError('Неверные параметры экспорта.')
         if self.rotation not in (0, 90, 180, 270) or self.crop_ratio not in ('', '16:9', '9:16', '1:1'):
@@ -194,9 +216,9 @@ class VideoExport:
                 filters += ',transpose=cclock'
             if options.mirror:
                 filters += ',hflip'
-            if options.crop_ratio:
-                cw, ch = options.geometry(info)
-                filters += f',crop={cw}:{ch}:(iw-ow)/2:(ih-oh)/2'
+            if options.crop_ratio or options.crop_rect:
+                cw,ch,cx,cy = options.crop_geometry(info)
+                filters += f',crop={cw}:{ch}:{cx}:{cy}'
             filters += f',scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2:reset_sar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1'
             if options.fps:
                 filters += f',fps={options.fps}'

@@ -10,10 +10,11 @@ from .ui import COLORS
 from .video_export import tool, CREATE_FLAGS
 
 class TimelineAssets(QThread):
-    def __init__(self, path, duration, audio, parent=None):
+    def __init__(self, path, duration, audio, parent=None, offset=0., span=None, count=12):
         super().__init__(parent)
         self.path, self.duration, self.audio = path, duration, audio
         self.images, self.waveform = [], QImage()
+        self.offset,self.span,self.count = offset,span or duration,count
         self.process = None
 
     def stop(self):
@@ -41,7 +42,7 @@ class TimelineAssets(QThread):
         try:
             with tempfile.TemporaryDirectory(prefix='mc-timeline-') as folder:
                 directory = Path(folder)
-                self.command(['-i', str(self.path), '-an', '-vf', f'fps={8/max(.001,self.duration)},scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2', '-frames:v', '8', str(directory/'thumb-%02d.jpg')])
+                self.command(['-ss',str(self.offset),'-i', str(self.path), '-t',str(self.span),'-an', '-vf', f'fps={self.count/max(.001,self.span)},scale=160:90:force_original_aspect_ratio=decrease', '-frames:v', str(self.count), str(directory/'thumb-%02d.jpg')])
                 self.images = [QImage(str(p)) for p in sorted(directory.glob('thumb-*.jpg'))]
                 if self.audio and not self.isInterruptionRequested():
                     width = max(1, min(1200, int(self.duration * 4000)))
@@ -54,6 +55,7 @@ class RangeTimeline(QWidget):
     rangeChanged = Signal(float, float)
     seekRequested = Signal(int)
     viewChanged = Signal()
+    segmentSelected = Signal(int)
 
     def __init__(self, duration, parent=None):
         super().__init__(parent)
@@ -65,10 +67,14 @@ class RangeTimeline(QWidget):
         self.offset = 0.
         self.frame_rate = 30.
         self.cuts = ()
+        self.splits = []
+        self.selected = -1
+        self.image_offset = 0.
+        self.image_span = self.duration
         self.setMinimumHeight(152)
         self.setMinimumWidth(320)
         self.setAccessibleName('Диапазон обрезки видео; точные границы доступны в полях начала и конца')
-        self.setToolTip('Перетащите левую или правую границу. Щелчок внутри шкалы — переход к кадру.')
+        self.setToolTip('Перетащите левую или правую границу. Щелчок по фрагменту — выделение. Колесо — прокрутка; Ctrl + колесо — масштаб.')
 
     def x(self, seconds):
         return 12+(self.width()-24)*(seconds-self.offset)/(self.duration/self.zoom)
@@ -90,8 +96,27 @@ class RangeTimeline(QWidget):
         self.update()
 
     def wheelEvent(self, event):
-        self.set_zoom(self.zoom*(1.5 if event.angleDelta().y() > 0 else 1/1.5), self.seconds(event.position().x()))
+        delta = event.angleDelta().y() or event.angleDelta().x() or event.pixelDelta().y()*3
+        if event.modifiers() & Qt.ControlModifier:
+            self.set_zoom(self.zoom*1.5**(delta/120),self.seconds(event.position().x()))
+        else:
+            self.offset = max(0,min(self.duration-self.duration/self.zoom,self.offset-delta/120*self.duration/self.zoom*.12))
+            self.viewChanged.emit()
+            self.update()
         event.accept()
+
+    def fragments(self):
+        from .video_export import ExportOptions
+        result=[]
+        for a,b in ExportOptions(cuts=self.cuts).segments(self.start,self.end):
+            points=[a]+sorted(p for p in self.splits if a<p<b)+[b]
+            result.extend(zip(points,points[1:]))
+        return result
+
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        self.viewChanged.emit()
 
     def set_range(self, start, end):
         self.start, self.end = start, end
@@ -108,6 +133,11 @@ class RangeTimeline(QWidget):
         if event.button() != Qt.LeftButton:
             return
         x = event.position().x()
+        if event.position().y() >= 30:
+            seconds = self.seconds(x)
+            self.selected = next((i for i,(a,b) in enumerate(self.fragments()) if a<=seconds<b),-1)
+            self.segmentSelected.emit(self.selected)
+            self.update()
         if abs(x-self.x(self.start)) <= 12:
             self.mode = 'start'
         elif abs(x-self.x(self.end)) <= 12:
@@ -161,9 +191,15 @@ class RangeTimeline(QWidget):
         painter.setClipRect(area)
         thumb_height = area.height()*.56
         if self.images:
-            width = area.width()*self.zoom/len(self.images)
-            for index,image in enumerate(self.images):
-                painter.drawImage(QRectF(self.x(0)+index*width,30,width,thumb_height),image)
+            # Fixed-size tiles; zoom requests denser samples for the visible interval.
+            tile = max(24,thumb_height*self.images[0].width()/max(1,self.images[0].height()))
+            first = math.floor((self.x(self.image_offset)-12)/tile)*tile+12
+            x = max(12,first)
+            while x < area.right():
+                t = self.offset+(x+tile/2-12)/area.width()*self.duration/self.zoom
+                index = max(0,min(len(self.images)-1,int((t-self.image_offset)/self.image_span*len(self.images))))
+                painter.drawImage(QRectF(x,30,tile,thumb_height),self.images[index])
+                x += tile
         if not self.waveform.isNull():
             wave = self.waveform.copy()
             tint = QPainter(wave)
@@ -178,8 +214,8 @@ class RangeTimeline(QWidget):
         for a,b in self.cuts:
             cut = QRectF(self.x(a),30,self.x(b)-self.x(a),area.height())
             painter.fillRect(cut,QColor(c['panel']))
-            painter.fillRect(cut,QBrush(QColor(c['muted']),Qt.BDiagPattern))
-            if cut.width()>90:
+
+            if False:
                 label_rect = QRectF(max(12,cut.left())+5,area.center().y()-12,min(cut.width()-10,140),24)
                 painter.fillRect(label_rect,QColor(c['panel']))
                 painter.setPen(QColor(c['text']))
@@ -188,6 +224,14 @@ class RangeTimeline(QWidget):
         painter.fillRect(QRectF(right,30,max(0,self.width()-12-right),area.height()),QColor(0,0,0,160))
         painter.setPen(QPen(QColor(c['accent']),2))
         painter.drawRect(QRectF(left,30,right-left,area.height()))
+        for i,(a,b) in enumerate(self.fragments()):
+            fragment=QRectF(self.x(a),30,self.x(b)-self.x(a),area.height())
+            painter.setPen(QPen(QColor(c['text'] if i==self.selected else c['accent']),3 if i==self.selected else 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(fragment,3,3)
+            if fragment.width()>75:
+                painter.fillRect(QRectF(fragment.left()+2,31,fragment.width()-4,18),QColor(c['selected']))
+                painter.drawText(QRectF(fragment.left()+5,31,fragment.width()-10,18),Qt.AlignLeft,f'{i+1} · {b-a:.2f} с')
         painter.restore()
         for x in (left,right):
             if 12 <= x <= self.width()-12:

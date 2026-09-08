@@ -1,6 +1,6 @@
 """Shared editor workspace, illustrated ratios and unobtrusive preview controls."""
 from PySide6.QtCore import Qt, QSize, QRectF, Signal, QEvent, QTimer, QPropertyAnimation
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen, QPainterPath, QRegion
 from PySide6.QtWidgets import (QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QGridLayout, QStackedWidget, QScrollArea, QButtonGroup, QApplication, QSizePolicy,
     QFrame, QGraphicsOpacityEffect, QDialog)
@@ -153,23 +153,30 @@ def field(layout, label, widget):
 
 
 class PreviewHost(QWidget):
-    def __init__(self, preview, controls=(), parent=None):
+    def __init__(self, preview, controls=(), parent=None, floating=True):
         super().__init__(parent)
+        self.floating = floating
         self.preview = preview
         self.fullscreen = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0,0,0,0)
         layout.addWidget(preview)
         self.bar = QFrame(self)
-        self.bar.setObjectName('floatingBar')
+        self.bar.setObjectName('floatingBar' if floating else 'editorBar')
+        self.bar.setAttribute(Qt.WA_TranslucentBackground, floating)
+        if not floating:
+            layout.addWidget(self.bar)
         row = QHBoxLayout(self.bar)
         row.setContentsMargins(9,6,9,6)
         row.setSpacing(5)
+        if not floating: row.addStretch()
         for widget in controls:
+            if not floating: widget.setSizePolicy(QSizePolicy.Maximum,QSizePolicy.Preferred)
             row.addWidget(widget)
         self.full_button = IconButton('maximize','Полный экран предпросмотра',compact=True)
         self.full_button.clicked.connect(self.toggle_fullscreen)
         row.addWidget(self.full_button)
+        if not floating: row.addStretch()
         self.effect = QGraphicsOpacityEffect(self.bar)
         self.bar.setGraphicsEffect(self.effect)
         self.animation = QPropertyAnimation(self.effect,b'opacity',self)
@@ -191,13 +198,15 @@ class PreviewHost(QWidget):
 
     def reveal(self):
         self.animation.stop()
-        self.effect.setOpacity(1.)
+        self.effect.setOpacity(.5 if self.floating else 1.)
         self.bar.show()
         self.bar.raise_()
         self.position_bar()
         self.timer.start()
 
     def fade(self):
+        if not self.floating:
+            return
         focused = QApplication.focusWidget()
         if self.bar.underMouse() or focused and self.bar.isAncestorOf(focused):
             self.timer.start()
@@ -207,11 +216,18 @@ class PreviewHost(QWidget):
         self.animation.start()
 
     def finish_fade(self):
+        if not self.floating:
+            return
         if self.effect.opacity() == 0:
             self.bar.hide()
 
     def position_bar(self):
+        if not self.floating:
+            return
         self.bar.adjustSize()
+        outline = QPainterPath()
+        outline.addRoundedRect(QRectF(self.bar.rect()),12,12)
+        self.bar.setMask(QRegion(outline.toFillPolygon().toPolygon()))
         self.bar.move(max(0,(self.width()-self.bar.width())//2),max(0,self.height()-self.bar.height()-12))
 
     def resizeEvent(self,event):

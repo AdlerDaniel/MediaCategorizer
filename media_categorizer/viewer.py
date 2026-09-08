@@ -1,8 +1,8 @@
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QImage, QPainter, QWindow
+from PySide6.QtCore import QEvent, QRectF, QSize, QSizeF, Qt, Signal
+from PySide6.QtGui import QImage, QPainter, QWindow, QTransform
 from PySide6.QtMultimedia import QVideoFrame
-from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget, QSizePolicy
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget, QSizePolicy, QGraphicsView, QGraphicsScene
 from .view_geometry import PanZoom
 from .ui import COLORS
 from PySide6.QtGui import QColor
@@ -188,7 +188,7 @@ class ImageCanvas(PanZoomInput, QWidget):
         painter.end()
 
 
-class VideoCanvas(PanZoomInput, QVideoWidget):
+class VideoCanvas(PanZoomInput, QGraphicsView):
     zoomChanged = Signal(int)
     pointerMoved = Signal()
 
@@ -201,15 +201,30 @@ class VideoCanvas(PanZoomInput, QVideoWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self._video_item = QGraphicsVideoItem()
+        self._scene.addItem(self._video_item)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._source_size = QSize(16, 9)
         self._auto_rotation = 0
         self._manual_rotation = 0
+        self._frame_rotation = 0
         self._init_interaction()
         self.setMinimumSize(1, 1)
-        self.setAspectRatioMode(Qt.KeepAspectRatio)
+        self._video_item.setAspectRatioMode(Qt.IgnoreAspectRatio)
         QApplication.instance().installEventFilter(self)
         if parent is not None:
             parent.installEventFilter(self)
+
+    def videoSink(self):
+        return self._video_item.videoSink()
+
+    def mouseMoveEvent(self,event):
+        self.pointerMoved.emit()
+        super().mouseMoveEvent(event)
 
     @property
     def manual_rotation(self):
@@ -226,8 +241,12 @@ class VideoCanvas(PanZoomInput, QVideoWidget):
         self.updateGeometry()
         self.update()
 
-    def set_video_geometry(self, size: QSize, auto_rotation=0):
+    def set_video_geometry(self, size: QSize, auto_rotation=0, frame_rotation=None):
         changed = False
+        frame_rotation = int(auto_rotation if frame_rotation is None else frame_rotation) % 360
+        if frame_rotation != self._frame_rotation:
+            self._frame_rotation = frame_rotation
+            changed = True
         if size is not None and size.isValid() and size.width() > 0 and size.height() > 0:
             new_size = QSize(size)
             if new_size != self._source_size:
@@ -324,3 +343,9 @@ class VideoCanvas(PanZoomInput, QVideoWidget):
         area, source = self._area_and_source()
         x, y, width, height = self.view.rectangle(*area, *source)
         self.setGeometry(round(x), round(y), max(1, round(width)), max(1, round(height)))
+        source=QSize(self._source_size)
+        if self._frame_rotation % 180:source.transpose()
+        self._video_item.setSize(QSizeF(source))
+        self._video_item.setTransform(QTransform().rotate(self._manual_rotation+self._auto_rotation-self._frame_rotation))
+        self.setSceneRect(self._video_item.sceneBoundingRect())
+        self.fitInView(self.sceneRect(),Qt.IgnoreAspectRatio)

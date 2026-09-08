@@ -1,8 +1,8 @@
 """Separate video editor with trim controls, preview and cancellable export."""
 from pathlib import Path
 from fractions import Fraction
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QMediaDevices
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal, QSettings
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QMediaDevices, QVideoFrame
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QDoubleSpinBox, QProgressBar, QMessageBox, QComboBox, QTabWidget, QWidget, QAbstractSpinBox
 from .ui import IconButton, ToggleSwitch
 from .ui import TimeSpinBox as QDoubleSpinBox
@@ -42,7 +42,14 @@ class VideoEditor(QDialog):
         self.assets = None
         self.close_after_cancel = False
         self.setWindowTitle('Редактировать видео — ' + self.path.name)
-        self.resize(1000, 780)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
+        self.resize(1100, 800)
+        from .settings import app_config_dir
+        self.window_settings = QSettings(str(app_config_dir()/'editor-windows.ini'),QSettings.IniFormat)
+        saved = self.window_settings.value('video/geometry')
+        if saved: self.restoreGeometry(saved)
+        self.finished.connect(self.remember_window)
+
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.audio.setVolume(.5)
@@ -52,6 +59,10 @@ class VideoEditor(QDialog):
         self.video = VideoPreview(self.info)
         self.player.setVideoSink(self.video.videoSink())
         self.cuts = []
+        self.custom_crop = ()
+        self.splits = []
+        self.edit_history = []
+        self.warming_preview = True
         try:
             self.frame_rate = float(Fraction(self.info['stream'].get('avg_frame_rate', '30/1'))) or 30
         except (ValueError, ZeroDivisionError):
@@ -129,7 +140,7 @@ class VideoEditor(QDialog):
         zoom_out.clicked.connect(lambda: self.set_view_zoom(self.video.view_zoom/1.25))
         zoom_in.clicked.connect(lambda: self.set_view_zoom(self.video.view_zoom*1.25))
         fit.clicked.connect(lambda: self.set_view_zoom(1))
-        self.preview_host = PreviewHost(self.video,(zoom_out,self.view_zoom_label,zoom_in,fit))
+        self.preview_host = PreviewHost(self.video,(zoom_out,self.view_zoom_label,zoom_in,fit), floating=False)
         workspace = QHBoxLayout()
         workspace.setContentsMargins(0,0,0,0)
         workspace.addWidget(self.preview_host,1)
@@ -145,21 +156,34 @@ class VideoEditor(QDialog):
         for widget in (self.play_btn, self.previous_frame, self.next_frame, self.timeline, self.time_label):
             transport.addWidget(widget)
         layout.addLayout(transport)
+        self.edit_toolbar = QWidget()
+        actions = QHBoxLayout(self.edit_toolbar)
+        actions.setContentsMargins(0,0,0,0)
+        self.undo_edit = IconButton('undo-2','Отменить монтаж',compact=True)
+        self.trim_left = IconButton('step-forward','Обрезать всё слева от курсора',compact=True)
+        self.trim_right = IconButton('step-back','Обрезать всё справа от курсора',compact=True)
+        self.split_btn = IconButton('scissors','Разделить фрагмент',compact=True)
+        self.delete_fragment = IconButton('trash-2','Удалить выбранный фрагмент',compact=True)
+        self.mirror_btn = IconButton('flip-horizontal-2','Отразить видео',compact=True)
+        self.crop_dialog_btn = IconButton('crop','Кадрировать',compact=True)
+        self.undo_edit.clicked.connect(self.undo_montage)
+        self.trim_left.clicked.connect(lambda:self.trim_at_cursor(True))
+        self.trim_right.clicked.connect(lambda:self.trim_at_cursor(False))
+        self.split_btn.clicked.connect(self.split_fragment)
+        self.delete_fragment.clicked.connect(self.remove_fragment)
+        self.mirror_btn.setCheckable(True)
+        self.mirror_btn.clicked.connect(self.mirror.toggle)
+        self.range_timeline.segmentSelected.connect(lambda index:self.delete_fragment.setEnabled(index>=0 and self.worker is None))
+        self.crop_dialog_btn.clicked.connect(self.open_crop)
+        for button in (self.undo_edit,self.trim_left,self.trim_right,self.split_btn,self.delete_fragment,self.mirror_btn,self.crop_dialog_btn):actions.addWidget(button)
+        actions.addStretch()
+        layout.addWidget(self.edit_toolbar)
         layout.addWidget(self.range_timeline)
-        zoom_row = QHBoxLayout()
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setRange(1, 64)
-        self.zoom_slider.setValue(1)
-        self.zoom_slider.setAccessibleName('Масштаб шкалы времени')
-        self.zoom_slider.valueChanged.connect(self.range_timeline.set_zoom)
-        self.pan_slider = QSlider(Qt.Horizontal)
-        self.pan_slider.setRange(0, 1000)
-        self.pan_slider.setAccessibleName('Прокрутка шкалы времени')
-        self.pan_slider.valueChanged.connect(lambda value: self.range_timeline.set_offset(value/1000))
-        self.range_timeline.viewChanged.connect(self.sync_timeline_view)
-        for widget in (QLabel('Масштаб'), self.zoom_slider, QLabel('Прокрутка'), self.pan_slider):
-            zoom_row.addWidget(widget)
-        layout.addLayout(zoom_row)
+        self.asset_timer = QTimer(self)
+        self.asset_timer.setSingleShot(True)
+        self.asset_timer.setInterval(200)
+        self.asset_timer.timeout.connect(self.refresh_assets)
+        self.range_timeline.viewChanged.connect(lambda: self.asset_timer.start())
         layout.addWidget(self.status)
         layout.addWidget(self.progress)
         footer = QHBoxLayout()
@@ -170,6 +194,8 @@ class VideoEditor(QDialog):
         self.player.errorOccurred.connect(self.preview_error)
         self.range_timeline.rangeChanged.connect(self.range_changed)
         self.update_controls()
+        self.player.mediaStatusChanged.connect(self.warm_status)
+        self.video.videoSink().videoFrameChanged.connect(self.warm_frame)
         self.player.setSource(QUrl.fromLocalFile(str(self.path)))
         self.assets = TimelineAssets(self.path, self.info["duration"], bool(self.info["audio"]), self)
         self.assets.finished.connect(self.assets_ready)
@@ -178,7 +204,7 @@ class VideoEditor(QDialog):
     def options(self):
         return ExportOptions(self.resolution.currentData(), self.fps.currentData(), self.quality.currentData(),
                              tuple(self.cuts), self.rotation.currentData(), self.mirror.isChecked(),
-                             self.crop_ratio.currentData(), self.normalize.isChecked())
+                             self.crop_ratio.currentData(), self.normalize.isChecked(), self.custom_crop)
 
     def refresh_audio_device(self):
         device = QMediaDevices.defaultAudioOutput()
@@ -210,30 +236,7 @@ class VideoEditor(QDialog):
             field(self.trim_layout,label,container)
         timing('Начало диапазона',self.start,self.mark_start)
         timing('Конец диапазона',self.end,self.mark_end)
-        self.cut_start,self.cut_end = QDoubleSpinBox(),QDoubleSpinBox()
-        for spin,label in ((self.cut_start,'Начало удаляемого фрагмента'),(self.cut_end,'Конец удаляемого фрагмента')):
-            spin.setRange(0,self.info['duration'])
-            spin.setDecimals(6)
-            spin.setSingleStep(1/self.frame_rate)
-            spin.setButtonSymbols(QAbstractSpinBox.PlusMinus)
-            spin.setSuffix(' с')
-            spin.setAccessibleName(label)
-        self.cut_end.setValue(min(1,self.info['duration']))
-        cut_in,cut_out = IconButton('step-forward','Отсюда'),IconButton('step-back','Досюда')
-        cut_in.clicked.connect(lambda:self.cut_start.setValue(self.player.position()/1000))
-        cut_out.clicked.connect(lambda:self.cut_end.setValue(self.player.position()/1000))
-        timing('Удалить: от',self.cut_start,cut_in)
-        timing('До',self.cut_end,cut_out)
-        self.add_cut_btn = IconButton('x','Вырезать фрагмент')
-        self.add_cut_btn.setProperty('destructive',True)
-        self.add_cut_btn.clicked.connect(self.add_cut)
-        self.trim_layout.addWidget(self.add_cut_btn)
-        self.cut_list = QComboBox()
-        self.cut_list.setMinimumContentsLength(10)
-        field(self.trim_layout,'Удалённые фрагменты',self.cut_list)
-        restore = IconButton('undo-2','Вернуть фрагмент')
-        restore.clicked.connect(self.restore_cut)
-        self.trim_layout.addWidget(restore)
+        self.trim_layout.addWidget(QLabel('Выберите фрагмент на таймлайне.\nИнструменты монтажа расположены над ним.'))
         self.rotation,self.crop_ratio = QComboBox(),QComboBox()
         for angle in (0,90,180,270):
             self.rotation.addItem(f'{angle}°',angle)
@@ -246,7 +249,10 @@ class VideoEditor(QDialog):
         field(crop_layout,'Поворот',self.rotation)
         self.mirror = ToggleSwitch('Отразить ↔')
         crop_layout.addWidget(self.mirror)
-        note = QLabel('Обрезка по центру. Предпросмотр показывает итоговую форму кадра.')
+        crop_button = IconButton('crop','Настроить рамку…')
+        crop_button.clicked.connect(self.open_crop)
+        crop_layout.addWidget(crop_button)
+        note = QLabel('Выберите формат или настройте рамку перетаскиванием границ.')
         note.setWordWrap(True)
         crop_layout.addWidget(note)
         self.normalize = ToggleSwitch('Нормализация звука')
@@ -262,47 +268,105 @@ class VideoEditor(QDialog):
         note = QLabel('Сохранение заменит исходное видео после проверки результата.')
         note.setWordWrap(True)
         export_layout.addWidget(note)
-        self.rotation.currentIndexChanged.connect(self.update_controls)
-        self.crop_ratio.currentIndexChanged.connect(self.update_controls)
+        self.rotation.currentIndexChanged.connect(self.clear_custom_crop)
+        self.crop_ratio.currentIndexChanged.connect(self.clear_custom_crop)
         self.mirror.toggled.connect(self.update_controls)
         self.normalize.toggled.connect(self.update_controls)
-
-    def sync_timeline_view(self):
-        timeline = self.range_timeline
-        self.zoom_slider.blockSignals(True)
-        self.zoom_slider.setValue(round(timeline.zoom))
-        self.zoom_slider.blockSignals(False)
-        available = timeline.duration-timeline.duration/timeline.zoom
-        self.pan_slider.blockSignals(True)
-        self.pan_slider.setValue(round(timeline.offset/available*1000) if available else 0)
-        self.pan_slider.blockSignals(False)
-        self.pan_slider.setEnabled(available > 0 and self.worker is None)
 
     def step_frame(self, direction):
         self.player.pause()
         frame = round(self.player.position()/1000*self.frame_rate)+direction
         self.player.setPosition(round(max(0, min(self.info['duration'], frame/self.frame_rate))*1000))
 
-    def add_cut(self):
-        left, right = self.cut_start.value(), self.cut_end.value()
-        if right-left < 1/self.frame_rate:
-            self.status.setText('Удаляемый фрагмент должен быть не короче одного кадра.')
+    def remember_window(self, *args):
+        self.window_settings.setValue('video/geometry',self.saveGeometry())
+        self.window_settings.sync()
+
+    def clear_custom_crop(self):
+        self.custom_crop=()
+        self.update_controls()
+
+    def open_crop(self):
+        from .video_crop import VideoCropDialog
+        from PySide6.QtGui import QTransform
+        self.player.pause()
+        # Qt toImage already applies frame/surface presentation rotation.
+        image=self.video.videoSink().videoFrame().toImage()
+        if image.isNull():
+            self.status.setText('Кадр ещё загружается. Попробуйте через секунду.')
             return
-        self.cuts.append((left, right))
+        image=image.scaled(round(self.info["width"]),round(self.info["height"]),Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
+        image=image.transformed(QTransform().rotate(self.rotation.currentData()))
+        if self.mirror.isChecked():image=image.flipped(Qt.Horizontal)
+        dialog=VideoCropDialog(image,self.custom_crop,self)
+        if dialog.exec()==QDialog.Accepted:
+            self.custom_crop=dialog.crop_rect()
+            self.update_controls()
+
+    def remember_montage(self):
+        self.edit_history.append((self.start.value(),self.end.value(),list(self.cuts),list(self.splits)))
+
+    def undo_montage(self):
+        if not self.edit_history:return
+        a,b,self.cuts,self.splits=self.edit_history.pop()
+        self.range_changed(a,b)
         self.refresh_cuts()
 
-    def restore_cut(self):
-        index = self.cut_list.currentIndex()
-        if 0 <= index < len(self.cuts):
-            self.cuts.pop(index)
+    def trim_at_cursor(self, left):
+        t=self.range_timeline.seconds(self.range_timeline.x(self.player.position()/1000))
+        if not self.start.value()<t<self.end.value():return
+        self.remember_montage()
+        (self.start if left else self.end).setValue(t)
+        self.refresh_cuts()
+
+    def split_fragment(self):
+        t=self.range_timeline.seconds(self.range_timeline.x(self.player.position()/1000))
+        if any(a+1/self.frame_rate<=t<=b-1/self.frame_rate for a,b in self.range_timeline.fragments()):
+            self.remember_montage()
+            self.splits.append(t)
+            self.refresh_cuts()
+
+    def remove_fragment(self):
+        fragments=self.range_timeline.fragments()
+        index=self.range_timeline.selected
+        if 0<=index<len(fragments):
+            self.remember_montage()
+            self.cuts.append(fragments[index])
             self.refresh_cuts()
 
     def refresh_cuts(self):
-        self.cut_list.clear()
-        for a, b in self.cuts:
-            self.cut_list.addItem(f'{a:.3f} — {b:.3f} с')
-        self.range_timeline.cuts = tuple(self.cuts)
+        self.range_timeline.cuts=tuple(self.cuts)
+        self.range_timeline.splits=list(self.splits)
+        self.range_timeline.selected=-1
         self.update_controls()
+
+    def warm_frame(self, frame):
+        if self.warming_preview and frame.isValid():
+            self.warming_preview=False
+            QTimer.singleShot(0,self,self.finish_warm_preview)
+
+    def finish_warm_preview(self):
+        if self.player.source().isEmpty():return
+        self.player.pause()
+        self.player.setPosition(0)
+        self.audio.setMuted(False)
+
+    def warm_status(self, status):
+        if self.warming_preview and status==QMediaPlayer.LoadedMedia:
+            self.audio.setMuted(True)
+            self.player.play()
+
+    def refresh_assets(self):
+        if self.worker:return
+        if self.assets and self.assets.isRunning():
+            self.assets.stop()
+            self.asset_timer.start()
+            return
+        if self.assets:self.assets.deleteLater()
+        t=self.range_timeline
+        self.assets=TimelineAssets(self.path,self.info['duration'],False,self,offset=t.offset,span=t.duration/t.zoom,count=max(8,min(64,round(t.width()/max(24,((t.height()-56)*.56)*(self.info['width']/self.info['height'])))+2)))
+        self.assets.finished.connect(self.assets_ready)
+        self.assets.start()
 
     def range_changed(self, start, end):
         self.start.blockSignals(True)
@@ -316,10 +380,14 @@ class VideoEditor(QDialog):
     def assets_ready(self):
         if self.assets:
             self.range_timeline.images = self.assets.images
-            self.range_timeline.waveform = self.assets.waveform
+            self.range_timeline.image_offset = self.assets.offset
+            self.range_timeline.image_span = self.assets.span
+            if not self.assets.waveform.isNull():
+                self.range_timeline.waveform = self.assets.waveform
             self.range_timeline.update()
 
     def stop_assets(self):
+        self.asset_timer.stop()
         if self.assets and self.assets.isRunning():
             self.assets.stop()
             self.assets.wait()
@@ -336,13 +404,19 @@ class VideoEditor(QDialog):
         busy = self.worker is not None
         options = self.options()
         duration = sum(b-a for a, b in options.segments(self.start.value(), self.end.value()))
-        for widget in (self.tabs, self.start, self.end, self.mark_start, self.mark_end, self.timeline, self.play_btn, self.reset_btn, self.range_timeline, self.resolution, self.fps, self.quality, self.previous_frame, self.next_frame, self.zoom_slider):
+        for widget in (self.tabs, self.start, self.end, self.mark_start, self.mark_end, self.timeline, self.play_btn, self.reset_btn, self.range_timeline, self.resolution, self.fps, self.quality, self.previous_frame, self.next_frame, self.edit_toolbar):
             widget.setEnabled(not busy)
-        self.sync_timeline_view()
+
+        self.delete_fragment.setEnabled(not busy and 0<=self.range_timeline.selected<len(self.range_timeline.fragments()))
+        self.undo_edit.setEnabled(not busy and bool(self.edit_history))
+        self.mirror_btn.setChecked(self.mirror.isChecked())
         self.normalize.setEnabled(not busy and bool(self.info['audio']))
         self.volume.setEnabled(not busy and bool(self.info['audio']))
         self.save_btn.setEnabled(not busy and duration >= 1/30)
         self.range_timeline.set_range(self.start.value(), self.end.value())
+        source_ratio=self.info["width"]/self.info["height"]
+        self.ratio_cards.buttons[0].ratio=1/source_ratio if options.rotation%180 else source_ratio
+        self.ratio_cards.buttons[0].update()
         self.video.set_options(options)
         size = self.options().estimate_bytes(self.info, max(0,duration))/1024/1024
         self.estimate.setText(f"≈ {size*.7:.1f}–{size*1.4:.1f} МБ")
@@ -387,6 +461,8 @@ class VideoEditor(QDialog):
         self.end.setValue(self.info['duration'])
         self.volume.setValue(100)
         self.cuts.clear()
+        self.splits.clear()
+        self.custom_crop=()
         self.rotation.setCurrentIndex(0)
         self.crop_ratio.setCurrentIndex(0)
         self.mirror.setChecked(False)
@@ -398,7 +474,9 @@ class VideoEditor(QDialog):
             return
         self.stop_assets()
         self.player.stop()
+        self.warming_preview=False
         self.player.setSource(QUrl())  # Release Windows file handles before replacement.
+        self.video.videoSink().setVideoFrame(QVideoFrame())
         self.worker = ExportThread(self.path, self.start.value(), self.end.value(), self.volume.value()/100, self.expected, self, options=self.options())
         self.worker.progress.connect(self.progress.setValue)
         self.worker.finished.connect(self.export_finished)
@@ -420,6 +498,7 @@ class VideoEditor(QDialog):
             super().reject()
             return
         self.update_controls()
+        self.warming_preview=True
         self.player.setSource(QUrl.fromLocalFile(str(self.path)))
         if worker.error:
             QMessageBox.warning(self, 'Не удалось сохранить видео', worker.error)
@@ -440,6 +519,8 @@ class VideoEditor(QDialog):
             self.worker.job.cancel()
             self.status.setText('Отмена сохранения…')
             return
+        self.warming_preview=False
         self.player.stop()
         self.player.setSource(QUrl())
+        self.video.videoSink().setVideoFrame(QVideoFrame())
         super().reject()

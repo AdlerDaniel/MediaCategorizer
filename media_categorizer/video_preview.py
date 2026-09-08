@@ -39,6 +39,7 @@ class VideoPreview(QGraphicsView):
 
     def update_geometry(self):
         from PySide6.QtCore import QSizeF
+        self.item.setAspectRatioMode(Qt.IgnoreAspectRatio)
         self.item.setSize(QSizeF(self.info['width'], self.info['height']))
         transform = QTransform()
         if self.options:
@@ -47,9 +48,9 @@ class VideoPreview(QGraphicsView):
             transform.rotate(self.options.rotation)
         self.item.setTransform(transform)
         rect = self.item.sceneBoundingRect()
-        if self.options and self.options.crop_ratio:
-            width, height = self.options.geometry(self.info)
-            rect = QRectF(rect.center().x()-width/2, rect.center().y()-height/2, width, height)
+        if self.options and (self.options.crop_ratio or self.options.crop_rect):
+            width,height,x,y = self.options.crop_geometry(self.info)
+            rect = QRectF(rect.left()+x,rect.top()+y,width,height)
         self.setSceneRect(rect)
         self.fitInView(rect, Qt.KeepAspectRatio)
         self.scale(self.view_zoom,self.view_zoom)

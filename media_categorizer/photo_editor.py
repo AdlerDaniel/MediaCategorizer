@@ -76,6 +76,7 @@ class CropCanvas(QWidget):
         self.guides = 'thirds'
         self.horizon = 0.
         self.horizon_visible = False
+        self.crop_enabled = True
         self.setMinimumSize(320, 220)
         self.setCursor(Qt.CrossCursor)
         self.setAccessibleName('Область обрезки фотографии')
@@ -102,6 +103,7 @@ class CropCanvas(QWidget):
 
     def set_horizon_visible(self, value):
         self.horizon_visible = value
+        self.crop_enabled = not value
         self.update()
 
     def wheelEvent(self, event):
@@ -133,7 +135,7 @@ class CropCanvas(QWidget):
             self.pan_start = event.position()
             event.accept()
             return
-        if event.button() != Qt.LeftButton or not self.image_rect().contains(event.position()):
+        if not self.crop_enabled or event.button() != Qt.LeftButton or not self.image_rect().contains(event.position()):
             return
         point = self.source_point(event.position())
         self.drag_mode = 'new'
@@ -148,6 +150,16 @@ class CropCanvas(QWidget):
             for x, y, opposite_x, opposite_y in corners:
                 if abs(point.x()-x) <= threshold and abs(point.y()-y) <= threshold:
                     self.start = QPointF(opposite_x, opposite_y)
+                    return
+            for side, coordinate, value, low, high in (
+                ('left',point.x(),r.x(),r.y(),r.y()+r.height()),
+                ('right',point.x(),r.x()+r.width(),r.y(),r.y()+r.height()),
+                ('top',point.y(),r.y(),r.x(),r.x()+r.width()),
+                ('bottom',point.y(),r.y()+r.height(),r.x(),r.x()+r.width())):
+                other = point.y() if side in ('left','right') else point.x()
+                if abs(coordinate-value) <= threshold and low <= other <= high:
+                    self.drag_mode = side
+                    self.start = point
                     return
             if r.contains(point.toPoint()):
                 self.drag_mode = 'move'
@@ -170,7 +182,28 @@ class CropCanvas(QWidget):
         if self.start is None:
             return
         end = self.source_point(event.position())
-        if self.drag_mode == 'move':
+        if self.drag_mode in ('left','right','top','bottom'):
+            r = self.drag_rect
+            left,top,right,bottom = r.x(),r.y(),r.x()+r.width(),r.y()+r.height()
+            if self.drag_mode == 'left': left = min(right-1,round(end.x()))
+            if self.drag_mode == 'right': right = max(left+1,round(end.x()))
+            if self.drag_mode == 'top': top = min(bottom-1,round(end.y()))
+            if self.drag_mode == 'bottom': bottom = max(top+1,round(end.y()))
+            if self.ratio:
+                if self.drag_mode in ('left','right'):
+                    height = min(self.image.height(),(right-left)/self.ratio)
+                    width = height*self.ratio
+                    left,right = (right-width,right) if self.drag_mode=='left' else (left,left+width)
+                    top = max(0,min(self.image.height()-height,r.center().y()-height/2))
+                    bottom = top+height
+                else:
+                    width = min(self.image.width(),(bottom-top)*self.ratio)
+                    height = width/self.ratio
+                    top,bottom = (bottom-height,bottom) if self.drag_mode=='top' else (top,top+height)
+                    left = max(0,min(self.image.width()-width,r.center().x()-width/2))
+                    right = left+width
+            self.selection = QRect(round(left),round(top),round(right-left),round(bottom-top)).intersected(self.image.rect())
+        elif self.drag_mode == 'move':
             r = self.drag_rect
             x = max(0, min(self.image.width()-r.width(), r.x()+round(end.x()-self.start.x())))
             y = max(0, min(self.image.height()-r.height(), r.y()+round(end.y()-self.start.y())))
@@ -205,7 +238,7 @@ class CropCanvas(QWidget):
         painter.fillRect(self.rect(), QColor(c['canvas']))
         rect = self.image_rect()
         painter.drawImage(rect, self.image)
-        if not self.selection.isEmpty():
+        if self.crop_enabled and not self.selection.isEmpty():
             scale = rect.width()/self.image.width()
             selected = QRectF(rect.x()+self.selection.x()*scale, rect.y()+self.selection.y()*scale,
                               self.selection.width()*scale, self.selection.height()*scale)
@@ -213,7 +246,7 @@ class CropCanvas(QWidget):
             painter.drawImage(selected, self.image, QRectF(self.selection))
             painter.setPen(QPen(QColor(c['accent']), 1.5))
             painter.drawRect(selected)
-            for point in (selected.topLeft(), selected.topRight(), selected.bottomLeft(), selected.bottomRight()):
+            for point in (selected.topLeft(), selected.topRight(), selected.bottomLeft(), selected.bottomRight(), QPointF(selected.center().x(),selected.top()), QPointF(selected.center().x(),selected.bottom()), QPointF(selected.left(),selected.center().y()), QPointF(selected.right(),selected.center().y())):
                 painter.fillRect(QRectF(point.x()-4, point.y()-4, 8, 8), QColor(c['accent']))
             parts = {'thirds':(1/3,2/3),'center':(.5,),'dense':tuple(i/8 for i in range(1,8)),'none':()}[self.guides]
             for part in parts:
@@ -228,7 +261,7 @@ class CropCanvas(QWidget):
         if self.horizon_visible:
             painter.save()
             painter.translate(rect.center())
-            painter.rotate(self.horizon)
+            painter.rotate(0)
             painter.setPen(QPen(QColor(c['accent']),2))
             length = min(self.width()*.35,rect.width()*.45)
             painter.drawLine(QPointF(-length,0),QPointF(length,0))
@@ -298,7 +331,8 @@ class PhotoEditor(QDialog):
         self.angle.setSingleStep(.1)
         self.angle.setSuffix('°')
         self.angle.setAccessibleName('Угол выравнивания горизонта')
-        self.angle.valueChanged.connect(self.canvas.set_horizon)
+        self.horizon_source = None
+        self.angle.valueChanged.connect(self.preview_horizon)
         self.straighten_btn = IconButton('rotate-cw','Выровнять')
         self.straighten_btn.clicked.connect(self.straighten)
         self.guides = QComboBox()
@@ -335,12 +369,12 @@ class PhotoEditor(QDialog):
         rotate_layout.addWidget(QLabel('Поворот на 90°'))
         field(horizon_layout,'Угол горизонта',self.angle)
         horizon_layout.addWidget(self.straighten_btn)
-        note = QLabel('Линия на фото показывает выбранный угол. После применения пустые углы обрезаются.')
+        note = QLabel('Изменяйте угол — фото сразу выравнивается. Линия остаётся горизонтальной. Пустые углы обрезаются.')
         note.setWordWrap(True)
         horizon_layout.addWidget(note)
         for page,label in ((crop_page,'Обрезка'),(rotate_page,'Поворот'),(horizon_page,'Горизонт')):
             self.tools.addTab(page,label)
-        self.tools.currentChanged.connect(lambda index: self.canvas.set_horizon_visible(index==2))
+        self.tools.currentChanged.connect(self.change_tool)
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         header = QHBoxLayout()
@@ -352,7 +386,7 @@ class PhotoEditor(QDialog):
         self.reset_btn.setProperty('destructive',True)
         layout.addLayout(header)
         workspace = QHBoxLayout()
-        self.preview_host = PreviewHost(self.canvas,(self.zoom_out,self.zoom_label,self.zoom_in,self.zoom_fit))
+        self.preview_host = PreviewHost(self.canvas,(self.zoom_out,self.zoom_label,self.zoom_in,self.zoom_fit), floating=False)
         workspace.addWidget(self.preview_host,1)
         workspace.addWidget(self.tools)
         container = QWidget()
@@ -402,12 +436,34 @@ class PhotoEditor(QDialog):
         self.canvas.update()
         self.update_controls()
 
+    def change_tool(self, index):
+        if index != 2:
+            self.straighten()
+        self.canvas.clear_selection()
+        self.canvas.set_horizon_visible(index == 2)
+
+    def preview_horizon(self, angle):
+        if self.horizon_source is None:
+            self.horizon_source = QImage(self.canvas.image)
+        source = self.horizon_source
+        self.canvas.horizon = angle
+        rotated = source.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+        radians = math.radians(abs(angle))
+        w,h = source.width(),source.height()
+        factor = min(w/(w*math.cos(radians)+h*math.sin(radians)),h/(w*math.sin(radians)+h*math.cos(radians)))
+        cw,ch = max(1,int(w*factor)-2),max(1,int(h*factor)-2)
+        self.canvas.image = source.copy() if not angle else rotated.copy((rotated.width()-cw)//2,(rotated.height()-ch)//2,cw,ch)
+        self.canvas.clear_selection()
+        self.save_btn.setEnabled(bool(angle) or self.dirty)
+        self.reset_btn.setEnabled(bool(angle) or self.dirty)
+        self.undo_btn.setEnabled(bool(angle) or bool(self.history))
+
     def straighten(self):
         angle = self.angle.value()
         if not angle:
             return
-        self.remember()
-        source = self.canvas.image
+        source = self.horizon_source or self.canvas.image
+        self.history.append(QImage(source))
         rotated = source.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
         # Largest centered rectangle of the original aspect entirely inside the rotated image.
         radians = math.radians(abs(angle))
@@ -418,7 +474,11 @@ class PhotoEditor(QDialog):
         self.dirty = True
         self.canvas.set_zoom(1)
         self.canvas.clear_selection()
+        self.horizon_source = None
+        self.angle.blockSignals(True)
         self.angle.setValue(0)
+        self.angle.blockSignals(False)
+        self.canvas.horizon = 0
 
     def remember(self):
         self.history.append(QImage(self.canvas.image))
@@ -427,6 +487,15 @@ class PhotoEditor(QDialog):
             self.history.pop(0)
 
     def undo(self):
+        if self.horizon_source is not None:
+            self.canvas.image = self.horizon_source
+            self.horizon_source = None
+            self.angle.blockSignals(True)
+            self.angle.setValue(0)
+            self.angle.blockSignals(False)
+            self.canvas.horizon = 0
+            self.canvas.clear_selection()
+            return
         if self.history:
             self.canvas.image = self.history.pop()
             self.dirty = self.canvas.image != self.original
@@ -453,12 +522,18 @@ class PhotoEditor(QDialog):
         self.canvas.clear_selection()
 
     def reset(self):
+        self.horizon_source = None
+        self.angle.blockSignals(True)
+        self.angle.setValue(0)
+        self.angle.blockSignals(False)
+        self.canvas.horizon = 0
         self.remember()
         self.canvas.image = QImage(self.original)
         self.dirty = False
         self.canvas.clear_selection()
 
     def save(self):
+        self.straighten()
         if not self.dirty and self.canvas.selection.isEmpty():
             return
         self.crop()
@@ -471,7 +546,7 @@ class PhotoEditor(QDialog):
         self.accept()
 
     def reject(self):
-        if self.dirty or not self.canvas.selection.isEmpty():
+        if self.dirty or self.angle.value() or not self.canvas.selection.isEmpty():
             answer = QMessageBox.question(self, 'Несохранённые правки', 'Закрыть редактор без сохранения?',
                                           QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel)
             if answer != QMessageBox.Discard:
