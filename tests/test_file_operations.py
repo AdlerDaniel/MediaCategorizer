@@ -92,13 +92,8 @@ class FileOperationTests(unittest.TestCase):
         self.assert_no_partials()
 
     def test_source_removal_failure_preserves_both_files(self):
-        original_unlink = Path.unlink
-        def locked_source(path, *args, **kwargs):
-            if path == self.source:
-                raise PermissionError("source is locked")
-            return original_unlink(path, *args, **kwargs)
         with patch("media_categorizer.file_operations._same_device", return_value=False), \
-             patch.object(Path, "unlink", locked_source), self.assertRaises(PublishedMoveError):
+             patch("media_categorizer.file_operations.remove_open_source", side_effect=PermissionError("source is locked")), self.assertRaises(PublishedMoveError):
             perform_file_operation("move", self.source, self.target)
         self.assertEqual(self.source.read_bytes(), self.target.read_bytes())
         self.assert_no_partials()

@@ -130,7 +130,9 @@ class Release63Tests(unittest.TestCase):
             editor.undo_montage()
             self.assertEqual(editor.cuts, [])
         finally:
-            editor.reject()
+            from PySide6.QtWidgets import QMessageBox
+            with patch.object(QMessageBox, "question", return_value=QMessageBox.Discard):
+                editor.reject()
             editor.deleteLater()
 
     def test_precise_crop_zoom_and_straighten_without_blank_corners(self):

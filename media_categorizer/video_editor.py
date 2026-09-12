@@ -200,6 +200,10 @@ class VideoEditor(QDialog):
         self.assets = TimelineAssets(self.path, self.info["duration"], bool(self.info["audio"]), self)
         self.assets.finished.connect(self.assets_ready)
         self.assets.start()
+        self.initial_edit_state = self.edit_state()
+
+    def edit_state(self):
+        return (self.start.value(), self.end.value(), self.volume.value(), self.options(), tuple(self.splits))
 
     def options(self):
         return ExportOptions(self.resolution.currentData(), self.fps.currentData(), self.quality.currentData(),
@@ -236,7 +240,9 @@ class VideoEditor(QDialog):
             field(self.trim_layout,label,container)
         timing('Начало диапазона',self.start,self.mark_start)
         timing('Конец диапазона',self.end,self.mark_end)
-        self.trim_layout.addWidget(QLabel('Выберите фрагмент на таймлайне.\nИнструменты монтажа расположены над ним.'))
+        hint = QLabel('Выберите фрагмент на таймлайне. Инструменты монтажа расположены над ним.')
+        hint.setWordWrap(True)
+        self.trim_layout.addWidget(hint)
         self.rotation,self.crop_ratio = QComboBox(),QComboBox()
         for angle in (0,90,180,270):
             self.rotation.addItem(f'{angle}°',angle)
@@ -245,6 +251,8 @@ class VideoEditor(QDialog):
         self.crop_ratio.setParent(self)
         self.crop_ratio.hide()
         self.ratio_cards = RatioCards(self.crop_ratio)
+        for button in self.ratio_cards.buttons:
+            button.clicked.connect(self.clear_custom_crop)
         crop_layout.addWidget(self.ratio_cards)
         field(crop_layout,'Поворот',self.rotation)
         self.mirror = ToggleSwitch('Отразить ↔')
@@ -364,7 +372,7 @@ class VideoEditor(QDialog):
             return
         if self.assets:self.assets.deleteLater()
         t=self.range_timeline
-        self.assets=TimelineAssets(self.path,self.info['duration'],False,self,offset=t.offset,span=t.duration/t.zoom,count=max(8,min(64,round(t.width()/max(24,((t.height()-56)*.56)*(self.info['width']/self.info['height'])))+2)))
+        self.assets=TimelineAssets(self.path,self.info['duration'],bool(self.info['audio']) and self.range_timeline.waveform.isNull(),self,offset=t.offset,span=t.duration/t.zoom,count=max(8,min(64,round(t.width()/max(24,((t.height()-56)*.56)*(self.info['width']/self.info['height'])))+2)))
         self.assets.finished.connect(self.assets_ready)
         self.assets.start()
 
@@ -513,12 +521,26 @@ class VideoEditor(QDialog):
             self.reject()
 
     def reject(self):
-        self.stop_assets()
         if self.worker:
+            answer = QMessageBox.question(self, 'Сохранение выполняется',
+                'Остановить сохранение и закрыть редактор без сохранения правок?',
+                QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer != QMessageBox.Discard:
+                return
             self.close_after_cancel = True
             self.worker.job.cancel()
             self.status.setText('Отмена сохранения…')
             return
+        if self.edit_state() != self.initial_edit_state:
+            answer = QMessageBox.question(self, 'Несохранённые изменения',
+                'Сохранить изменения видео перед закрытием?',
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer == QMessageBox.Save:
+                self.save()
+                return
+            if answer != QMessageBox.Discard:
+                return
+        self.stop_assets()
         self.warming_preview=False
         self.player.stop()
         self.player.setSource(QUrl())

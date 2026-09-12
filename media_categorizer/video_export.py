@@ -115,12 +115,8 @@ class ExportOptions:
         if self.resolution not in ('720', '1080'):
             raise ValueError('Неизвестное разрешение.')
         short, long = (720, 1280) if self.resolution == '720' else (1080, 1920)
-        if self.crop_rect:
-            scale=min(long/max(source_width,source_height),short/min(source_width,source_height))
-            return max(2,int(source_width*scale)//2*2),max(2,int(source_height*scale)//2*2)
-        if self.crop_ratio == '1:1':
-            return short, short
-        return (short, long) if source_height > source_width else (long, short)
+        scale = min(long/max(source_width, source_height), short/min(source_width, source_height))
+        return max(2, round(source_width*scale/2)*2), max(2, round(source_height*scale/2)*2)
 
     def crop_geometry(self, info):
         width,height = info['width'],info['height']

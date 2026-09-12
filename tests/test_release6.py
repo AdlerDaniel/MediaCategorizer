@@ -59,7 +59,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(filter_records(records, 'B.MP4')[0]['path'].name, 'b.mp4')
         self.assertEqual(len(filter_records(records, kind='photo')), 1)
         self.assertEqual(filter_records(records, sort='size')[0]['path'].name, 'b.mp4')
-        processed = processed_paths([{'status':'OK', 'result':str(self.path)}])
+        processed = processed_paths([{'status':'OK', 'action':'COPY', 'result':str(self.path)}])
         self.assertEqual(len(filter_records(records, kind='processed', processed=processed)), 1)
         self.assertFalse(scan_files(self.root, cancelled=lambda: True))
 

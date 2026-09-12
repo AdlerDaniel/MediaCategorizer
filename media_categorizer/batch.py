@@ -217,6 +217,7 @@ class BatchDialog(QDialog):
             self.worker = None
             self.main.file_reservations.release(self.operation_id)
             self.cancel_btn.setText('Закрыть')
+            self.restore_controls()
             self.status.setText('Не удалось запустить очередь: ' + str(exc))
 
     def record(self, result):
@@ -231,6 +232,15 @@ class BatchDialog(QDialog):
         self.cancel_btn.setText('Закрыть')
         count = sum(result['status']=='OK' for result in self.results)
         self.status.setText(f'Завершено: {count} из {len(self.plans)}. Результат каждой операции указан в таблице.')
+        relocated = {r['source']: r['target'] for r in self.results
+                     if r['status'] == 'OK' and r['kind'] in ('move', 'rename')}
+        self.paths = [relocated.get(path, path) for path in self.paths]
+        self.restore_controls()
+
+    def restore_controls(self):
+        for widget in (self.mode,self.category,self.resolution,self.fps,self.quality,self.volume,self.prepare_btn):
+            widget.setEnabled(True)
+        self.invalidate()
 
     def reject(self):
         if self.worker:

@@ -13,7 +13,10 @@ from .batch import BatchDialog
 
 
 def processed_paths(records):
-    return {path_key(Path(value)) for record in records if record.get('status') == 'OK'
+    return {path_key(Path(value)) for record in records if record.get('status') == 'OK' and record.get('action') in {
+                'RENAME', 'MOVE', 'COPY', 'RENAME+MOVE', 'RENAME+COPY',
+                'BATCH_RENAME', 'BATCH_MOVE', 'BATCH_COPY', 'BATCH_VIDEO',
+                'BATCH_FLIP_H', 'BATCH_FLIP_V', 'BATCH_ROTATE', 'EDIT', 'EDIT_PHOTO', 'EDIT_VIDEO'}
             for value in (record.get('source'), record.get('result')) if value}
 
 

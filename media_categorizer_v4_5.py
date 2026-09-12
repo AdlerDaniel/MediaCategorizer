@@ -64,7 +64,7 @@ from media_categorizer.constants import (
 )
 from media_categorizer.settings import load_settings, save_settings, log_path, normalize_categories
 from media_categorizer.naming import safe_filename, sanitize_category, filter_duplicate_tags, render_rename
-from media_categorizer.file_operations import FileReservations, perform_file_operation, rename_no_replace
+from media_categorizer.file_operations import FileReservations, perform_file_operation, rename_no_replace, file_state, remove_unchanged_copy
 from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, VideoViewport
 
 
@@ -172,14 +172,7 @@ def oriented_video_frame_image(frame) -> QImage:
     if image.isNull():
         return image
 
-    try:
-        fmt = frame.surfaceFormat()
-        surface_rotation = rotation_degrees(fmt.rotation()) if hasattr(fmt, "rotation") else 0
-        surface_mirror = bool(fmt.isMirrored()) if hasattr(fmt, "isMirrored") else False
-        image = rotate_and_mirror(image, surface_rotation, surface_mirror)
-    except Exception:
-        pass
-
+    # Qt toImage applies surface rotation/mirroring; only frame metadata remains.
     try:
         if hasattr(frame, "rotation"):
             frame_rotation = rotation_degrees(frame.rotation())
@@ -265,7 +258,14 @@ class ImageLoadTask(QRunnable):
         self.signals = ImageLoadSignals()
 
     def run(self):
-        image = read_oriented_image(self.path) if self.path.exists() else QImage()
+        self.state = None
+        try:
+            self.state = file_state(self.path)
+            image = read_oriented_image(self.path)
+            if self.state != file_state(self.path):
+                image = QImage()
+        except OSError:
+            image = QImage()
         self.signals.loaded.emit(str(self.path), image, self.revision)
 
 
@@ -717,12 +717,14 @@ class FileOperationTask(QRunnable):
         self.source = Path(source)
         self.target = Path(target)
         self.signals = FileOperationSignals()
+        self.receipt = {}
 
     def run(self):
         try:
             perform_file_operation(
                 self.kind, self.source, self.target,
                 lambda copied, total: self.signals.progress.emit(self.op_id, copied, total),
+                receipt=self.receipt,
             )
         except Exception as exc:
             self.signals.finished.emit(self.op_id, False, str(self.target), str(exc))
@@ -980,6 +982,7 @@ class MediaCategorizer(QMainWindow):
         self.file_reservations = FileReservations()
 
         self.image_cache = OrderedDict()
+        self.image_cache_states = {}
         self.image_cache_bytes = 0
         self.pending_image_loads = set()
         self.image_revisions = {}
@@ -1974,6 +1977,7 @@ class MediaCategorizer(QMainWindow):
 
     def _clear_image_cache(self):
         self.image_cache.clear()
+        self.image_cache_states.clear()
         self.image_cache_bytes = 0
         self.pending_image_loads.clear()
 
@@ -1984,6 +1988,11 @@ class MediaCategorizer(QMainWindow):
         if key in self.image_cache:
             old = self.image_cache.pop(key)
             self.image_cache_bytes -= self._image_bytes(old)
+        try:
+            state = file_state(path)
+        except OSError:
+            return
+        self.image_cache_states[key] = state
         self.image_cache[key] = image
         self.image_cache.move_to_end(key)
         self.image_cache_bytes += self._image_bytes(image)
@@ -1991,11 +2000,19 @@ class MediaCategorizer(QMainWindow):
             len(self.image_cache) > IMAGE_CACHE_MAX_ITEMS
             or self.image_cache_bytes > IMAGE_CACHE_MAX_BYTES
         ) and self.image_cache:
-            _, evicted = self.image_cache.popitem(last=False)
+            evicted_key, evicted = self.image_cache.popitem(last=False)
+            self.image_cache_states.pop(evicted_key, None)
             self.image_cache_bytes -= self._image_bytes(evicted)
 
     def _take_cached_image(self, path: Path) -> QImage:
         key = str(path)
+        try:
+            valid = self.image_cache_states.get(key) == file_state(path)
+        except OSError:
+            valid = False
+        if not valid:
+            self._drop_cache_path(path)
+            return QImage()
         image = self.image_cache.get(key)
         if image is None:
             return QImage()
@@ -2004,20 +2021,26 @@ class MediaCategorizer(QMainWindow):
 
     def _request_image_preload(self, path: Path):
         key = str(path)
-        if key in self.image_cache or key in self.pending_image_loads or not path.exists():
+        if not self._take_cached_image(path).isNull() or key in self.pending_image_loads or not path.exists():
             return
         self.pending_image_loads.add(key)
         task = ImageLoadTask(path, self.image_revisions.get(key, 0))
-        task.signals.loaded.connect(self._on_image_preloaded)
+        task.signals.loaded.connect(lambda p, image, revision, t=task:
+                                    self._on_image_preloaded(p, image, revision, t.state))
         # Keep task/signals alive until the queued signal is delivered.
         task.signals.loaded.connect(lambda _p, _i, _r, t=task: None)
         self.thread_pool.start(task)
 
-    def _on_image_preloaded(self, path_str, image, revision=0):
+    def _on_image_preloaded(self, path_str, image, revision=0, expected=None):
         self.pending_image_loads.discard(path_str)
         if revision != self.image_revisions.get(path_str, 0):
             return
         path = Path(path_str)
+        try:
+            if expected is not None and expected != file_state(path):
+                return
+        except OSError:
+            return
         if not image.isNull() and path.exists():
             self._cache_image(path, image)
 
@@ -2839,6 +2862,7 @@ class MediaCategorizer(QMainWindow):
                 "source": source,
                 "result": target,
                 "index": info["index"],
+                "result_state": info["task"].receipt.get("result_state"),
             })
         else:
             self.append_log(info["action_label"], source, target, "ERROR", error)
@@ -3000,6 +3024,7 @@ class MediaCategorizer(QMainWindow):
 
     def _drop_cache_path(self, path: Path):
         key = str(path)
+        self.image_cache_states.pop(key, None)
         image = self.image_cache.pop(key, None)
         if image is not None:
             self.image_cache_bytes -= self._image_bytes(image)
@@ -3007,6 +3032,9 @@ class MediaCategorizer(QMainWindow):
     def _rename_cache_key(self, old_path: Path, new_path: Path):
         old_key = str(old_path)
         new_key = str(new_path)
+        state = self.image_cache_states.pop(old_key, None)
+        if state is not None:
+            self.image_cache_states[new_key] = state
         image = self.image_cache.pop(old_key, None)
         if image is not None:
             self.image_cache[new_key] = image
@@ -3080,7 +3108,7 @@ class MediaCategorizer(QMainWindow):
             elif kind == "copy":
                 if not result.exists():
                     raise FileNotFoundError(f"Копия уже отсутствует: {result}")
-                result.unlink()
+                remove_unchanged_copy(result, action.get("result_state"))
                 try:
                     self.current_index = self.files.index(source)
                 except ValueError:

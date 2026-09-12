@@ -94,7 +94,7 @@ class VideoTests(unittest.TestCase):
         ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=120x200:rate=15:duration=1', '-c:v', 'libx264', self.path)
         VideoExport().run(self.path, 0, 1, 1, signature(self.path))
         info = probe(self.path)
-        self.assertEqual((info['width'], info['height']), (720, 1280))
+        self.assertEqual((info['width'], info['height']), (720, 1200))
         self.assertFalse(info['audio'])
 
     def test_output_containers_match_original_extension(self):
