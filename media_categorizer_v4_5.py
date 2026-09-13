@@ -1071,7 +1071,7 @@ class MediaCategorizer(QMainWindow):
         self.open_folder_btn.setText('Открыть')
         self.open_folder_btn.clicked.disconnect(self.open_folder)
         open_menu = QMenu(self.open_folder_btn)
-        for label,callback in (('Папку…',self.open_folder),('Файл…',self.open_file),('Последнюю папку',self.open_last_folder)):
+        for label,callback in (('Проводник…',self.open_explorer),('Папку…',self.open_folder),('Файл…',self.open_file),('Последнюю папку',self.open_last_folder)):
             open_menu.addAction(label).triggered.connect(callback)
         self.open_folder_btn.setMenu(open_menu)
         for button in (self.open_file_btn,self.last_folder_btn,self.fullscreen_btn):
@@ -1520,6 +1520,13 @@ class MediaCategorizer(QMainWindow):
     def show_updates(self):
         from media_categorizer.updates import UpdatesDialog
         UpdatesDialog(self).exec()
+
+    def open_explorer(self):
+        if self.active_file_operation is not None or self.file_operation_queue:
+            QMessageBox.information(self, APP_NAME, 'Дождитесь завершения текущих операций.')
+            return
+        from media_categorizer.explorer import ExplorerDialog
+        ExplorerDialog(self).exec()
 
     def open_library(self):
         if self.active_file_operation is not None or self.file_operation_queue:
