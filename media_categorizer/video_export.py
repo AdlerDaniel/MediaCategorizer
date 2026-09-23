@@ -53,8 +53,12 @@ def probe(path):
         pass
     if round(rotation) % 180:
         width, height = height, width
-    return dict(duration=duration, width=width, height=height, stream=video,
-                audio=[s for s in data['streams'] if s.get('codec_type') == 'audio'])
+    # Some containers expose placeholder audio streams (ffprobe reports
+    # codec_name="none"). Passing these into atrim makes FFmpeg fail before
+    # it can start the export because there is no decoder for that stream.
+    audio = [s for s in data['streams']
+             if s.get('codec_type') == 'audio' and s.get('codec_name') not in (None, '', 'none')]
+    return dict(duration=duration, width=width, height=height, stream=video, audio=audio)
 
 
 def encoding(suffix):

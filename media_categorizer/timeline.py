@@ -54,6 +54,8 @@ class TimelineAssets(QThread):
 class RangeTimeline(QWidget):
     rangeChanged = Signal(float, float)
     seekRequested = Signal(int)
+    scrubStarted = Signal()
+    scrubFinished = Signal()
     viewChanged = Signal()
     segmentSelected = Signal(int)
 
@@ -144,6 +146,7 @@ class RangeTimeline(QWidget):
             self.mode = 'end'
         else:
             self.mode = 'seek'
+            self.scrubStarted.emit()
         self.mouseMoveEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -162,7 +165,10 @@ class RangeTimeline(QWidget):
 
     def mouseReleaseEvent(self, event):
         self.mouseMoveEvent(event)
+        was_seeking = self.mode == 'seek'
         self.mode = None
+        if was_seeking:
+            self.scrubFinished.emit()
 
     def paintEvent(self,event):
         painter = QPainter(self)

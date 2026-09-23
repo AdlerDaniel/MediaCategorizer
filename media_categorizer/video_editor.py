@@ -1,4 +1,5 @@
 """Separate video editor with trim controls, preview and cancellable export."""
+import time
 from pathlib import Path
 from fractions import Fraction
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal, QSettings
@@ -41,6 +42,9 @@ class VideoEditor(QDialog):
         self.worker = None
         self.assets = None
         self.close_after_cancel = False
+        self.scrubbing = False
+        self.pending_seek = None
+        self.last_seek_at = 0.0
         self.setWindowTitle('Редактировать видео — ' + self.path.name)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint)
         self.resize(1100, 800)
@@ -72,10 +76,17 @@ class VideoEditor(QDialog):
         self.player.playbackStateChanged.connect(lambda state: self.play_btn.set_playing(state == QMediaPlayer.PlayingState))
         self.range_timeline = RangeTimeline(self.info["duration"])
         self.range_timeline.frame_rate = self.frame_rate
-        self.range_timeline.seekRequested.connect(self.player.setPosition)
+        self.range_timeline.seekRequested.connect(self.request_preview_seek)
+        self.range_timeline.scrubStarted.connect(self.begin_scrub)
+        self.range_timeline.scrubFinished.connect(self.end_scrub)
         self.timeline = QSlider(Qt.Horizontal)
         self.timeline.setRange(0, round(self.info['duration']*1000))
-        self.timeline.sliderMoved.connect(self.player.setPosition)
+        self.timeline.sliderPressed.connect(self.begin_scrub)
+        self.timeline.sliderMoved.connect(self.request_preview_seek)
+        self.timeline.sliderReleased.connect(self.end_scrub)
+        self.seek_timer = QTimer(self)
+        self.seek_timer.setSingleShot(True)
+        self.seek_timer.timeout.connect(self.flush_preview_seek)
         self.player.positionChanged.connect(self.position_changed)
         self.time_label = QLabel('00:00.000')
         self.start = QDoubleSpinBox()
@@ -216,6 +227,38 @@ class VideoEditor(QDialog):
             self.audio.setDevice(device)
         self.audio.setMuted(False)
         self.audio.setVolume(self.volume.value()/200)
+
+    def begin_scrub(self):
+        if not self.scrubbing:
+            self.scrubbing = True
+            self.player.pause()
+
+    def end_scrub(self):
+        self.scrubbing = False
+        self.seek_timer.stop()
+        self.flush_preview_seek()
+
+    def request_preview_seek(self, position):
+        position = int(position)
+        if not self.scrubbing:
+            self.player.setPosition(position)
+            return
+        # Coalesce rapid mouse-move events. Seeking on every event queues work
+        # in the media backend, so displayed frames can lag far behind the cursor.
+        self.pending_seek = position
+        interval_ms = 140
+        elapsed_ms = (time.monotonic() - self.last_seek_at) * 1000
+        if elapsed_ms >= interval_ms:
+            self.flush_preview_seek()
+        elif not self.seek_timer.isActive():
+            self.seek_timer.start(max(1, round(interval_ms - elapsed_ms)))
+
+    def flush_preview_seek(self):
+        if self.pending_seek is None:
+            return
+        position, self.pending_seek = self.pending_seek, None
+        self.last_seek_at = time.monotonic()
+        self.player.setPosition(position)
 
     def set_view_zoom(self,value):
         self.video.set_zoom(value)

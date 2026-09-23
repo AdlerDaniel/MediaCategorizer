@@ -2,6 +2,7 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import array
 import hashlib
+import json
 import math
 from pathlib import Path
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 from media_categorizer.video_export import VideoExport, ExportCancelled, tool, probe, signature, CREATE_FLAGS
@@ -48,6 +50,37 @@ class VideoTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_probe_ignores_placeholder_audio_codec(self):
+        payload = {
+            'streams': [
+                {'index': 0, 'codec_type': 'video', 'codec_name': 'h264', 'width': 320, 'height': 180,
+                 'duration': '1.0', 'avg_frame_rate': '30/1'},
+                {'index': 1, 'codec_type': 'audio', 'codec_name': 'none'},
+                {'index': 2, 'codec_type': 'audio', 'codec_name': 'aac'},
+            ],
+            'format': {'duration': '1.0'},
+        }
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload).encode(), stderr=b'')
+        with patch('media_categorizer.video_export.tool', return_value='ffprobe'), \
+             patch('media_categorizer.video_export.subprocess.run', return_value=completed):
+            info = probe(self.path)
+        self.assertEqual([stream['index'] for stream in info['audio']], [2])
+
+    def test_timeline_scrubbing_coalesces_to_latest_position(self):
+        positions = []
+        editor = SimpleNamespace(
+            scrubbing=True, pending_seek=None, last_seek_at=time.monotonic(),
+            seek_timer=SimpleNamespace(start=lambda *_: None, stop=lambda: None, isActive=lambda: False),
+            player=SimpleNamespace(setPosition=lambda position: positions.append(position)),
+        )
+        editor.flush_preview_seek = lambda: VideoEditor.flush_preview_seek(editor)
+        VideoEditor.request_preview_seek(editor, 120)
+        VideoEditor.request_preview_seek(editor, 480)
+        self.assertEqual(editor.pending_seek, 480)
+        self.assertEqual(positions, [])
+        VideoEditor.end_scrub(editor)
+        self.assertEqual(positions, [480])
 
     def test_trim_720p_30fps_and_half_volume(self):
         VideoExport().run(self.path, .5, 2, .5, signature(self.path))
