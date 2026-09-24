@@ -7,7 +7,7 @@ from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal, QFile
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -91,6 +91,7 @@ RESERVED_SHORTCUTS = {
     QKeySequence("Ctrl+=").toString(QKeySequence.PortableText),
     QKeySequence("Ctrl+-").toString(QKeySequence.PortableText),
     QKeySequence("Ctrl+0").toString(QKeySequence.PortableText),
+    QKeySequence(Qt.Key_Delete).toString(QKeySequence.PortableText),
 }
 
 
@@ -1094,8 +1095,9 @@ class MediaCategorizer(QMainWindow):
         top_layout.addWidget(self.progress_label)
         for button in (self.menu_btn,self.theme_btn):
             top_layout.addWidget(button)
-        self.top_widget = QWidget()
-        self.top_widget.setLayout(top_layout)
+        top_content = QWidget()
+        top_content.setLayout(top_layout)
+        self.top_widget = self.scroll_toolbar(top_content)
 
         self.multi_btn = ToggleSwitch("Несколько тегов")
         self.apply_tags_btn = IconButton("check", "Применить теги")
@@ -1157,8 +1159,9 @@ class MediaCategorizer(QMainWindow):
         for button in (self.rotate_left_btn,self.rotate_right_btn,self.thumbnail_toggle_btn,self.properties_toggle_btn):
             button.setParent(self)
             button.hide()
-        self.tools_widget = QWidget()
-        self.tools_widget.setLayout(tools_layout)
+        tools_content = QWidget()
+        tools_content.setLayout(tools_layout)
+        self.tools_widget = self.scroll_toolbar(tools_content)
 
         # V4.5: the media viewport is now a real expanding layout container.
         # In V4.4 the canvas geometry was assigned manually; on some Windows/Qt
@@ -1221,6 +1224,14 @@ class MediaCategorizer(QMainWindow):
         self.speed_combo = QComboBox()
         for rate in (0.5, 1.0, 1.5, 2.0, 3.0):
             self.speed_combo.addItem(f"{rate:g}×", rate)
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(max(0, min(100, int(self.settings.get("video_volume", 100)))))
+        self.volume_slider.setFixedWidth(112)
+        self.volume_slider.setAccessibleName("Громкость видео")
+        self.volume_slider.setToolTip("Громкость видео: 0–100%")
+        self.volume_label = QLabel(f"{self.volume_slider.value()}%")
+        self.volume_label.setMinimumWidth(38)
 
         self.play_btn.clicked.connect(self.toggle_play_pause)
         self.minus5_btn.clicked.connect(lambda: self.seek_relative(-5000))
@@ -1231,6 +1242,7 @@ class MediaCategorizer(QMainWindow):
         self.timeline.sliderReleased.connect(self._timeline_released)
         self.timeline.sliderMoved.connect(self._timeline_moved)
         self.speed_combo.currentIndexChanged.connect(self.set_playback_rate_from_combo)
+        self.volume_slider.valueChanged.connect(self.set_video_volume)
 
         timeline_row = QHBoxLayout()
         timeline_row.setContentsMargins(0, 0, 0, 0)
@@ -1252,12 +1264,17 @@ class MediaCategorizer(QMainWindow):
         transport_row.addStretch()
         transport_row.addWidget(self.loop_btn)
         transport_row.addWidget(self.sound_btn)
+        transport_row.addWidget(self.volume_slider)
+        transport_row.addWidget(self.volume_label)
+
+        transport_content = QWidget()
+        transport_content.setLayout(transport_row)
 
         video_controls_layout = QVBoxLayout()
         video_controls_layout.setContentsMargins(0, 2, 0, 2)
         video_controls_layout.setSpacing(4)
         video_controls_layout.addLayout(timeline_row)
-        video_controls_layout.addLayout(transport_row)
+        video_controls_layout.addWidget(self.scroll_toolbar(transport_content))
         self.video_controls_widget = QWidget()
         self.video_controls_widget.setMaximumWidth(900)
         self.video_controls_widget.setLayout(video_controls_layout)
@@ -1383,6 +1400,8 @@ class MediaCategorizer(QMainWindow):
         area.setWidgetResizable(True)
         area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content.adjustSize()
+        content.setMinimumSize(content.sizeHint())
         area.setWidget(content)
         area.setMinimumWidth(0)
         return area
@@ -1392,8 +1411,11 @@ class MediaCategorizer(QMainWindow):
         if hasattr(self, 'tools_widget'):
             for area in (self.top_widget, self.tools_widget):
                 if isinstance(area, QScrollArea):
-                    area.widget().layout().invalidate()
-                    area.setFixedHeight(max(round(54*ui_scale()), area.widget().sizeHint().height()+round(16*ui_scale())))
+                    content = area.widget()
+                    content.layout().invalidate()
+                    content.adjustSize()
+                    content.setMinimumSize(content.sizeHint())
+                    area.setFixedHeight(max(round(54*ui_scale()), content.sizeHint().height()+round(16*ui_scale())))
         if isinstance(getattr(self, 'scroll', None), QScrollArea):
             self.scroll.setFixedHeight(round(84*ui_scale()))
 
@@ -1481,6 +1503,8 @@ class MediaCategorizer(QMainWindow):
         self.settings["loop_video"] = self.loop_btn.isChecked()
         self.settings["muted"] = not self.sound_btn.isChecked()
         self.settings["playback_rate"] = 1.0
+        if hasattr(self, 'volume_slider'):
+            self.settings["video_volume"] = self.volume_slider.value()
         self.settings.setdefault("rename_template", DEFAULT_TEMPLATE)
         save_settings(self.settings)
 
@@ -1598,6 +1622,7 @@ class MediaCategorizer(QMainWindow):
             (Qt.Key_Right, self.next_file),
             (Qt.Key_Left, self.previous_file),
             ("Ctrl+Z", self.undo_last_action),
+            (Qt.Key_Delete, self.delete_current_photo),
             ("Space", self.toggle_play_pause),
             ("Ctrl+Left", lambda: self.seek_relative(-5000)),
             ("Ctrl+Right", lambda: self.seek_relative(5000)),
@@ -1872,6 +1897,12 @@ class MediaCategorizer(QMainWindow):
         self._sync_video_audio()
         self._persist_settings()
 
+    def set_video_volume(self, value):
+        value = max(0, min(100, int(value)))
+        self.volume_label.setText(f"{value}%")
+        for slot in getattr(self, 'video_slots', []):
+            slot['audio'].setVolume(value / 100)
+
     def _refresh_audio_devices(self):
         device = QMediaDevices.defaultAudioOutput()
         for slot in self.video_slots:
@@ -1886,7 +1917,7 @@ class MediaCategorizer(QMainWindow):
             active = index == self.active_video_slot and slot['path'] == self.current_file and not slot['preloading'] and slot['path'] is not None
             player, audio = slot['player'], slot['audio']
             audio.setMuted(not active or not self.sound_btn.isChecked())
-            audio.setVolume(1.)
+            audio.setVolume(self.volume_slider.value() / 100 if hasattr(self, 'volume_slider') else 1.)
             if active:
                 if player.audioOutput() is not audio:
                     player.setAudioOutput(audio)
@@ -2754,6 +2785,15 @@ class MediaCategorizer(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, 'progress_label'):
+            show_progress = event.size().width() >= 760
+            if self.progress_label.isHidden() == show_progress:
+                self.progress_label.setVisible(show_progress)
+                if isinstance(self.top_widget, QScrollArea):
+                    content = self.top_widget.widget()
+                    content.adjustSize()
+                    content.setMinimumSize(content.sizeHint())
+                    self.top_widget.horizontalScrollBar().setValue(0)
         QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def rotate_current_view(self, degrees):
@@ -3142,6 +3182,41 @@ class MediaCategorizer(QMainWindow):
             return
         self.current_index = max(0, self.current_index - 1)
         self.show_current_file()
+
+    def delete_current_photo(self):
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QKeySequenceEdit)):
+            return
+        if isinstance(focus, QComboBox) and focus.isEditable():
+            return
+        path = self.current_file
+        if not path or path.suffix.lower() not in IMAGE_EXTENSIONS or path not in self.files:
+            return
+        if self._warn_if_busy(path):
+            return
+        answer = QMessageBox.question(
+            self, "Переместить фото в корзину",
+            f"Переместить «{path.name}» в корзину?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.stop_all_video()
+        try:
+            result = QFile.moveToTrash(str(path))
+            moved = result[0] if isinstance(result, tuple) else result
+            if not moved:
+                raise OSError("Windows не удалось переместить фото в корзину.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось удалить фото", str(exc))
+            return
+
+        key = str(path)
+        self.image_revisions[key] = self.image_revisions.get(key, 0) + 1
+        self.append_log("DELETE", path, detail="Фото перемещено в корзину с клавиши Delete")
+        self.files.remove(path)
+        self.refresh_after_batch([])
 
     def _warn_if_busy(self, *paths):
         if not self.file_reservations.is_busy(*paths):
