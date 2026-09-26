@@ -33,6 +33,16 @@ class Interface64Tests(unittest.TestCase):
         self.env.stop()
         self.temp.cleanup()
 
+    def test_video_controls_keep_volume_visible_without_horizontal_scrolling(self):
+        main=TestWindow()
+        self.windows.append(main)
+        layout=main.video_controls_widget.layout()
+        self.assertEqual(layout.count(),3)  # timeline, playback, and audio rows
+        self.assertEqual(main.video_controls_widget.findChildren(QScrollArea),[])
+        self.assertIsNotNone(main.volume_slider.parentWidget())
+        self.assertEqual(main.volume_slider.minimum(),0)
+        self.assertEqual(main.volume_slider.maximum(),100)
+
     def test_disabling_focused_categories_preserves_scroll_position(self):
         # First reproduce Qt's default behavior, then verify our specialized area.
         values=[]
