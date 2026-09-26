@@ -43,6 +43,18 @@ class Interface64Tests(unittest.TestCase):
         self.assertEqual(main.volume_slider.minimum(),0)
         self.assertEqual(main.volume_slider.maximum(),100)
 
+    def test_main_toolbar_keeps_status_on_the_left_and_menu_icons_unclipped(self):
+        main=TestWindow()
+        self.windows.append(main)
+        top_layout=main.top_widget.widget().layout()
+        self.assertLess(top_layout.indexOf(main.progress_label),top_layout.indexOf(main.open_folder_btn))
+        self.assertEqual(main.progress_label.alignment(),Qt.AlignLeft|Qt.AlignVCenter)
+        self.assertGreaterEqual(main.theme_btn.width(),48)
+        apply_theme('dark','normal',False)
+        stylesheet=self.app.styleSheet()
+        self.assertIn('QScrollArea { background: transparent; border: none;',stylesheet)
+        self.assertIn('QMainWindow, QDialog { background:',stylesheet)
+
     def test_disabling_focused_categories_preserves_scroll_position(self):
         # First reproduce Qt's default behavior, then verify our specialized area.
         values=[]

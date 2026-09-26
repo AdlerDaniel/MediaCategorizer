@@ -118,7 +118,9 @@ class IconButton(QPushButton):
                 self.setMinimumWidth(0)
                 self.setMaximumWidth(16777215)
             else:
-                self.setFixedWidth(round(38*factor))
+                # A compact button with a menu also needs room for Qt's menu
+                # arrow; keeping it at 38px makes the arrow collide with icons.
+                self.setFixedWidth(round((48 if self.menu() else 38)*factor))
 
     def refresh_icon(self):
         theme = QApplication.instance().property('theme') or 'dark'
@@ -201,7 +203,7 @@ def apply_theme(theme, size=None, labels=None):
     app.setPalette(palette)
     stylesheet = '''
         QWidget { color: %(text)s; font-family: "Segoe UI"; font-size: 13px; }
-        QMainWindow, QDialog { background: %(bg)s; }
+        QMainWindow, QDialog { background: %(bg)s; border: none; }
         QPushButton { background: %(panel)s; border: 1px solid %(border)s; border-radius: 8px; padding: 8px 12px; }
         QPushButton:hover { background: %(hover)s; border-color: %(accent)s; }
         QPushButton:pressed, QPushButton:checked { background: %(selected)s; border-color: %(accent)s; }
@@ -210,6 +212,7 @@ def apply_theme(theme, size=None, labels=None):
         QPushButton[primary="true"] { background: %(selected)s; border-color: %(accent)s; font-weight: 600; }
         QPushButton[destructive="true"] { border-style: dashed; color: %(text)s; }
         QPushButton[destructive="true"]:hover { border-color: %(accent)s; background: %(selected)s; }
+        QPushButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: right center; width: 10px; }
         QLabel#sectionTitle { font-size: 16px; font-weight: 600; }
         QFrame#floatingBar { background: %(panel)s; border: 1px solid %(border)s; border-radius: 12px; }
         QStackedWidget#toolPanel { background: %(panel)s; border-radius: 10px; }
@@ -229,7 +232,8 @@ def apply_theme(theme, size=None, labels=None):
         QSlider::groove:horizontal { height: 5px; background: %(border)s; border-radius: 2px; }
         QSlider::sub-page:horizontal { background: %(accent)s; border-radius: 2px; }
         QSlider::handle:horizontal { background: %(accent)s; border: 2px solid %(panel)s; width: 13px; margin: -6px 0; border-radius: 8px; }
-        QScrollArea, QListWidget, QTableWidget { background: %(panel)s; border: 1px solid %(border)s; border-radius: 8px; }
+        QScrollArea { background: transparent; border: none; border-radius: 0; }
+        QListWidget, QTableWidget { background: %(panel)s; border: 1px solid %(border)s; border-radius: 8px; }
         QListWidget::item:selected { background: %(selected)s; border: 1px solid %(accent)s; border-radius: 6px; }
         QHeaderView::section { background: %(panel)s; padding: 8px; border: none; border-bottom: 1px solid %(border)s; }
         QScrollBar:horizontal { background: %(bg)s; height: 10px; }

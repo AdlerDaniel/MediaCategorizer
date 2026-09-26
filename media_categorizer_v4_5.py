@@ -1012,9 +1012,9 @@ class MediaCategorizer(QMainWindow):
     # ---------- UI ----------
     def _build_ui(self):
         self.progress_label = ElidedLabel("0 / 0 • осталось: 0")
-        self.progress_label.setMinimumWidth(80)
+        self.progress_label.setMinimumWidth(144)
         self.progress_label.setMaximumWidth(220)
-        self.progress_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.progress_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.fullscreen_status_label = QLabel("0 / 0 • осталось: 0   •   F11 / Esc — выйти из полного экрана")
         self.fullscreen_status_label.setAlignment(Qt.AlignCenter)
         self.fullscreen_status_label.hide()
@@ -1086,13 +1086,11 @@ class MediaCategorizer(QMainWindow):
         self.theme_btn.refresh_size()
         top_layout = QHBoxLayout()
         top_layout.setContentsMargins(0,0,0,0)
-        brand.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred)
-        brand.setMinimumWidth(0)
-        top_layout.addWidget(brand,1)
+        top_layout.setSpacing(4)
+        top_layout.addWidget(self.progress_label)
+        top_layout.addStretch()
         for button in (self.open_folder_btn,self.library_btn,self.undo_btn):
             top_layout.addWidget(button)
-        top_layout.addStretch()
-        top_layout.addWidget(self.progress_label)
         for button in (self.menu_btn,self.theme_btn):
             top_layout.addWidget(button)
         top_content = QWidget()
@@ -2788,15 +2786,6 @@ class MediaCategorizer(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'progress_label'):
-            show_progress = event.size().width() >= 760
-            if self.progress_label.isHidden() == show_progress:
-                self.progress_label.setVisible(show_progress)
-                if isinstance(self.top_widget, QScrollArea):
-                    content = self.top_widget.widget()
-                    content.adjustSize()
-                    content.setMinimumSize(content.sizeHint())
-                    self.top_widget.horizontalScrollBar().setValue(0)
         QTimer.singleShot(0, self, self._on_media_viewport_resized)
 
     def rotate_current_view(self, degrees):
