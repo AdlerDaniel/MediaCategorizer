@@ -79,6 +79,15 @@ class StartupUpdateTests(unittest.TestCase):
             self.controller.checked(self.release)
             self.assertFalse(offer.called)
 
+    def test_audio_removal_defers_startup_update_offer(self):
+        with patch.object(UpdatePrompt, 'exec', return_value=0) as offer:
+            self.main.active_audio_removal = {'path': 'video.mp4'}
+            self.controller.checked(self.release)
+            self.assertFalse(offer.called)
+            self.main.active_audio_removal = None
+            self.controller.offer()
+            self.assertEqual(offer.call_count, 1)
+
     def test_update_button_downloads_then_installs_without_second_click(self):
         dialog = UpdatePrompt(self.main, self.release)
         with patch('media_categorizer.updates.download_release', return_value='fixture.exe'), patch.object(dialog, 'install') as install:

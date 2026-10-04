@@ -192,7 +192,7 @@ class UpdatesDialog(QDialog):
             self.install_btn.setEnabled(False)
             self.download_btn.setEnabled(True)
             return
-        if self.main.active_file_operation or self.main.file_operation_queue:
+        if self.main.active_file_operation or self.main.file_operation_queue or getattr(self.main, 'active_audio_removal', None):
             QMessageBox.information(self, 'Обновление', 'Дождитесь завершения очереди операций.')
             return
         script = installer_command(self.downloaded)
@@ -280,7 +280,8 @@ class StartupUpdates(QObject):
         if self.cancelled.is_set() or not self.pending:
             return
         if (not self.main.isVisible() or QApplication.activeModalWidget() is not None
-                or self.main.active_file_operation or self.main.file_operation_queue):
+                or self.main.active_file_operation or self.main.file_operation_queue
+                or getattr(self.main, 'active_audio_removal', None)):
             return
         self.timer.stop()
         release, self.pending = self.pending, None

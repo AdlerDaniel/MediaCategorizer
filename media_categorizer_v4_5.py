@@ -70,6 +70,9 @@ from media_categorizer.viewer import ImageCanvas, MediaViewport, VideoCanvas, Vi
 
 from media_categorizer.photo_editor import PhotoEditor
 from media_categorizer.video_editor import VideoEditor
+from media_categorizer.video_audio import WaveformTask, RemoveAudioTask
+from media_categorizer.audio_widgets import WaveformWidget, RenderProgress
+from media_categorizer.video_export import signature as video_signature
 from media_categorizer.category_widgets import CategoryButton, CategoryStrip, CategoryScrollArea
 from media_categorizer.editor_widgets import ElidedLabel, PreviewHost
 from media_categorizer.ui import IconButton, ToggleSwitch, apply_theme, icon, COLORS, THEME_NAMES
@@ -996,6 +999,10 @@ class MediaCategorizer(QMainWindow):
         self.media_devices.audioOutputsChanged.connect(self._refresh_audio_devices)
         self.timeline_dragging = False
         self._native_frame_guard = False
+        self.waveform_cache = OrderedDict()
+        self.waveform_tasks = {}
+        self.active_audio_removal = None
+        self._audio_closing = False
 
         apply_theme(self.settings.get("theme", "dark"), self.settings.get('ui_size', 'normal'), self.settings.get('icon_labels', False))
         self._build_ui()
@@ -1104,6 +1111,12 @@ class MediaCategorizer(QMainWindow):
         self.sound_btn = ToggleSwitch("Звук")
         self.edit_photo_btn = IconButton("pencil", "Редактировать")
         self.edit_photo_btn.clicked.connect(self.edit_current_media)
+        self.remove_audio_btn = IconButton('volume-x', 'Убрать звук')
+        self.remove_audio_btn.setToolTip('Удалить все звуковые дорожки и заменить исходное видео без изменения качества')
+        self.remove_audio_btn.clicked.connect(self.remove_current_video_audio)
+        self.remove_audio_btn.hide()
+        self.render_progress = RenderProgress()
+        self.render_progress.hide()
         self.rotate_left_btn = IconButton("rotate-ccw", "Повернуть влево", compact=True)
         self.rotate_right_btn = IconButton("rotate-cw", "Повернуть вправо", compact=True)
         self.thumbnail_toggle_btn = IconButton("images", "Миниатюры", compact=True)
@@ -1141,6 +1154,8 @@ class MediaCategorizer(QMainWindow):
         tools_layout.addWidget(self.apply_tags_btn)
         tools_layout.addStretch()
         tools_layout.addWidget(self.edit_photo_btn)
+        tools_layout.addWidget(self.remove_audio_btn)
+        tools_layout.addWidget(self.render_progress)
         self.view_menu_btn = IconButton('images','Просмотр')
         view_menu = QMenu(self.view_menu_btn)
         for label,callback in (('Вписать в окно',self.reset_zoom),('Увеличить',lambda:self.change_zoom(10)),('Уменьшить',lambda:self.change_zoom(-10)),('Повернуть влево',lambda:self.rotate_current_view(-90)),('Повернуть вправо',lambda:self.rotate_current_view(90)),('Полный экран',self.toggle_fullscreen)):
@@ -1216,6 +1231,8 @@ class MediaCategorizer(QMainWindow):
         self.frame_back_btn = IconButton("step-back", "Предыдущий кадр (Alt+←)", compact=True)
         self.frame_next_btn = IconButton("step-forward", "Следующий кадр (Alt+→)", compact=True)
         self.timeline = QSlider(Qt.Horizontal)
+        self.waveform = WaveformWidget()
+        self.waveform.seekRequested.connect(self.seek_waveform)
         self.timeline.setRange(0, 1000)
         self.timeline.setMinimumWidth(360)
         self.time_label = QLabel("00:00 / 00:00")
@@ -1245,8 +1262,13 @@ class MediaCategorizer(QMainWindow):
         timeline_row = QHBoxLayout()
         timeline_row.setContentsMargins(0, 0, 0, 0)
         timeline_row.addStretch()
-        timeline_row.addWidget(self.timeline, 1)
-        timeline_row.addWidget(self.time_label)
+        timeline_column = QVBoxLayout()
+        timeline_column.setContentsMargins(0, 0, 0, 0)
+        timeline_column.setSpacing(4)
+        timeline_column.addWidget(self.timeline)
+        timeline_column.addWidget(self.waveform)
+        timeline_row.addLayout(timeline_column, 1)
+        timeline_row.addWidget(self.time_label, 0, Qt.AlignTop)
         timeline_row.addStretch()
 
         transport_row = QHBoxLayout()
@@ -1710,6 +1732,155 @@ class MediaCategorizer(QMainWindow):
         else:
             self.edit_photo()
 
+    # ---------- Audio preview and quick removal ----------
+    def _request_waveform(self, path):
+        if self._audio_closing:
+            return
+        try:
+            expected = video_signature(path)
+        except OSError as exc:
+            self.waveform.set_error(str(exc))
+            return
+        key = (str(path), expected)
+        self.waveform.set_loading()
+        if key in self.waveform_cache:
+            self.waveform_cache.move_to_end(key)
+            self.waveform.set_data(*self.waveform_cache[key])
+            return
+        for old_key, task in list(self.waveform_tasks.items()):
+            if old_key != key:
+                task.job.cancel()
+        if key in self.waveform_tasks:
+            return
+        task = WaveformTask(path, expected)
+        task.signals.waveform.connect(self._on_waveform_ready)
+        self.waveform_tasks[key] = task
+        self.thread_pool.start(task)
+
+    def _on_waveform_ready(self, key, result, error):
+        task = self.waveform_tasks.pop(key, None)
+        if self._audio_closing:
+            return
+        removal = self.active_audio_removal
+        if removal and removal['path'] == Path(key[0]) and removal['task'] is None:
+            self._start_audio_removal()
+            return
+        if result is not None:
+            self.waveform_cache[key] = result
+            self.waveform_cache.move_to_end(key)
+            while len(self.waveform_cache) > 24:
+                self.waveform_cache.popitem(last=False)
+        if self.current_file != Path(key[0]) or self.file_reservations.is_busy(Path(key[0])):
+            return
+        try:
+            if video_signature(self.current_file) != key[1]:
+                return
+        except OSError:
+            return
+        if result is None:
+            if task and task.job.cancelled.is_set():
+                self._request_waveform(self.current_file)
+                return
+            self.waveform.set_error(error)
+        else:
+            self.waveform.set_data(*result)
+            player = self._active_player()
+            if player:
+                self.waveform.set_position(player.position() / 1000)
+
+    def seek_waveform(self, seconds):
+        player = self._active_player()
+        if player and not self.file_reservations.is_busy(self.current_file):
+            player.setPosition(max(0, min(player.duration(), round(seconds * 1000))))
+
+    def remove_current_video_audio(self):
+        path = self.current_file
+        if self.active_audio_removal or not path or path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return
+        operation_id = 'remove-audio-' + uuid.uuid4().hex
+        try:
+            expected = video_signature(path)
+            self.file_reservations.acquire(operation_id, path)
+        except (OSError, RuntimeError) as exc:
+            self.statusBar().showMessage(str(exc), 12000)
+            return
+        player = self._active_player()
+        position = player.position() if player else 0
+        playing = bool(player and player.playbackState() == QMediaPlayer.PlayingState)
+        self.active_audio_removal = dict(path=path, expected=expected, operation_id=operation_id,
+                                         position=position, playing=playing, task=None,
+                                         preview=self.video_canvas.grab().toImage())
+        self.stop_all_video()
+        self.image_label.set_image(self.active_audio_removal['preview'])
+        self.image_label.set_zoom_percent(100)
+        self.media_pages.setCurrentWidget(self.image_label)
+        self.video_canvas.hide()
+        self.image_label.show()
+        self.render_progress.set_value(0)
+        self.render_progress.show()
+        self.waveform.set_loading()
+        self.waveform.message = 'Удаление звука…'
+        self.waveform.update()
+        self.update_controls()
+        pending = [task for key, task in self.waveform_tasks.items() if key[0] == str(path)]
+        for task in pending:
+            task.job.cancel()
+        if not pending:
+            self._start_audio_removal()
+
+    def _start_audio_removal(self):
+        removal = self.active_audio_removal
+        if not removal or removal['task'] is not None:
+            return
+        if any(key[0] == str(removal['path']) for key in self.waveform_tasks):
+            return
+        task = RemoveAudioTask(removal['path'], removal['expected'])
+        removal['task'] = task
+        task.signals.progress.connect(self.render_progress.set_value)
+        task.signals.finished.connect(self._on_audio_removed)
+        self.thread_pool.start(task)
+
+    def _on_audio_removed(self, result, error):
+        removal = self.active_audio_removal
+        if not removal:
+            return
+        path = removal['path']
+        self.file_reservations.release(removal['operation_id'])
+        self.active_audio_removal = None
+        self.render_progress.hide()
+        for key in list(self.waveform_cache):
+            if key[0] == str(path):
+                self.waveform_cache.pop(key, None)
+        if result is not None:
+            self.thumbnail_cache.pop(str(path), None)
+            try:
+                self.waveform_cache[(str(path), video_signature(path))] = ((), result['duration'])
+            except OSError:
+                pass
+            self.append_log('REMOVE_AUDIO', path, path, detail='Звуковые дорожки удалены; видеоряд сохранён без перекодирования')
+            self.statusBar().showMessage('Звук удалён: ' + path.name, 7000)
+        else:
+            self.append_log('REMOVE_AUDIO', path, status='ERROR', detail=error)
+            self.statusBar().showMessage('Не удалось удалить звук: ' + error, 15000)
+            self.remove_audio_btn.setToolTip('Не удалось удалить звук: ' + error)
+        if self.current_file == path:
+            self.show_current_file()
+            player = self._active_player()
+            if player:
+                # Loading a new source is asynchronous: restore only when loaded.
+                self.video_slots[self.active_video_slot]['restore_after_audio'] = (removal['position'], removal['playing'])
+                if player.mediaStatus() in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+                    self._restore_after_audio_removal(self.active_video_slot)
+        self.update_controls()
+
+    def _restore_after_audio_removal(self, index):
+        slot = self.video_slots[index]
+        restore = slot.pop('restore_after_audio', None)
+        if restore is not None:
+            slot['player'].setPosition(min(slot['player'].duration(), restore[0]))
+            if not restore[1]:
+                slot['player'].pause()
+
     def edit_video(self):
         path = self.current_file
         if not path or path.suffix.lower() not in VIDEO_EXTENSIONS:
@@ -2117,7 +2288,7 @@ class MediaCategorizer(QMainWindow):
         scan_end = min(len(self.files), self.current_index + VIDEO_SCAN_AHEAD + 1)
         for idx in range(self.current_index + 1, scan_end):
             path = self.files[idx]
-            if path.suffix.lower() in VIDEO_EXTENSIONS and path.exists():
+            if path.suffix.lower() in VIDEO_EXTENSIONS and path.exists() and not self.file_reservations.is_busy(path):
                 upcoming.append(path)
                 if len(upcoming) >= VIDEO_PRELOAD_COUNT:
                     break
@@ -2272,6 +2443,7 @@ class MediaCategorizer(QMainWindow):
         except Exception:
             pass
         slot["path"] = None
+        slot.pop('restore_after_audio', None)
         slot["preloading"] = False
         slot["preview"] = QImage()
         slot["last_frame_start_us"] = None
@@ -2501,6 +2673,7 @@ class MediaCategorizer(QMainWindow):
             return
         if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
             self._sync_video_audio()
+            self._restore_after_audio_removal(index)
         if status == QMediaPlayer.MediaStatus.EndOfMedia and self.loop_btn.isChecked():
             slot = self.video_slots[index]
             if slot["path"] == self.current_file:
@@ -2520,6 +2693,7 @@ class MediaCategorizer(QMainWindow):
             self.timeline.setValue(value)
             self.timeline.blockSignals(False)
         self.time_label.setText(f"{format_millis(position)} / {format_millis(duration)}")
+        self.waveform.set_position(position / 1000)
 
     def _on_duration_changed(self, index, duration):
         if index == self.active_video_slot:
@@ -2724,6 +2898,9 @@ class MediaCategorizer(QMainWindow):
             return
 
         path = self.files[self.current_index]
+        for key, task in self.waveform_tasks.items():
+            if key[0] != str(path):
+                task.job.cancel()
         self.current_file = path
         self.filename_label.setText(str(path))
         self.update_progress()
@@ -2754,6 +2931,15 @@ class MediaCategorizer(QMainWindow):
             self.image_label.hide()
             self.video_canvas.show()
             self.video_controls_widget.show()
+            if self.active_audio_removal and self.active_audio_removal['path'] == path:
+                self.image_label.set_image(self.active_audio_removal['preview'])
+                self.image_label.set_zoom_percent(100)
+                self.media_pages.setCurrentWidget(self.image_label)
+                self.video_canvas.hide()
+                self.image_label.show()
+                self.update_controls()
+                return
+            self._request_waveform(path)
             preloaded_index = self._find_video_slot(path)
             if preloaded_index is not None and preloaded_index != self.active_video_slot:
                 self._activate_preloaded_video(preloaded_index, path)
@@ -3239,10 +3425,17 @@ class MediaCategorizer(QMainWindow):
         self.rotate_left_btn.setEnabled(has_current)
         self.rotate_right_btn.setEnabled(has_current)
         is_video = has_current and self.current_file.suffix.lower() in VIDEO_EXTENSIONS
+        self.remove_audio_btn.setVisible(bool(is_video))
+        self.remove_audio_btn.setEnabled(bool(is_video and not busy and not self.active_audio_removal))
+        self.waveform.setEnabled(bool(is_video and not busy))
         for widget in (self.play_btn, self.minus5_btn, self.plus5_btn, self.frame_back_btn, self.frame_next_btn, self.timeline, self.speed_combo):
-            widget.setEnabled(bool(is_video))
+            widget.setEnabled(bool(is_video and not (self.active_audio_removal and self.active_audio_removal['path'] == self.current_file)))
 
     def closeEvent(self, event):
+        if self.active_audio_removal:
+            self.statusBar().showMessage('Удаление звука ещё выполняется. Дождитесь завершения обработки.', 7000)
+            event.ignore()
+            return
         if self.active_file_operation is not None or self.file_operation_queue:
             QMessageBox.information(
                 self, APP_NAME,
@@ -3252,6 +3445,9 @@ class MediaCategorizer(QMainWindow):
             event.ignore()
             return
         self.stop_all_video()
+        self._audio_closing = True
+        for task in self.waveform_tasks.values():
+            task.job.cancel()
         self.settings["window_maximized"] = self.isMaximized() or self.fullscreen_mode
         if hasattr(self, 'startup_updates'):
             self.startup_updates.stop()
