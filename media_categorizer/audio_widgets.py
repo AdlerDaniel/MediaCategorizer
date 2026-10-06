@@ -1,4 +1,5 @@
 """Theme-aware audio waveform and compact circular processing indicator."""
+import math
 from PySide6.QtCore import Qt, QRectF, QSize, Signal, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
@@ -13,7 +14,12 @@ class WaveformWidget(QWidget):
         self.peaks = ()
         self.duration = 0.
         self.position = 0.
-        self.message = 'Загрузка аудиограммы…'
+        self.message = ''
+        self.total_bins = 0
+        self.visible_bins = 0.
+        self.reveal_timer = QTimer(self)
+        self.reveal_timer.setInterval(16)
+        self.reveal_timer.timeout.connect(self._reveal)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAccessibleName('Аудиограмма видео — нажмите для перемотки')
@@ -27,19 +33,51 @@ class WaveformWidget(QWidget):
         self.update()
 
     def set_loading(self):
+        self.reveal_timer.stop()
         self.peaks, self.duration, self.position = (), 0., 0.
-        self.message = 'Загрузка аудиограммы…'
-        self.setToolTip(self.message)
+        self.total_bins, self.visible_bins = 0, 0.
+        self.message = ''
+        self.setToolTip('Громкость звука по времени · нажмите для перемотки')
         self.update()
 
-    def set_data(self, peaks, duration):
+    def set_partial(self, peaks, duration, total_bins):
         self.peaks = tuple(peaks)
         self.duration = max(0., float(duration))
+        self.total_bins = max(len(self.peaks), int(total_bins))
+        self.message = ''
+        self.reveal_timer.start()
+        self.update()
+
+    def _reveal(self):
+        self.visible_bins = min(len(self.peaks), self.visible_bins + max(1., self.total_bins * .045))
+        if self.visible_bins >= len(self.peaks):
+            self.reveal_timer.stop()
+        self.update()
+
+    def set_data(self, peaks, duration, animate=False):
+        self.peaks = tuple(peaks)
+        self.total_bins = len(self.peaks)
+        self.duration = max(0., float(duration))
         self.message = '' if peaks else 'В видео нет звуковой дорожки'
+        if animate and peaks:
+            self.reveal_timer.start()
+        else:
+            self.reveal_timer.stop()
+            self.visible_bins = float(len(self.peaks))
         self.setToolTip('Громкость звука по времени · нажмите или перетащите для перемотки' if peaks else self.message)
         self.update()
 
+    @staticmethod
+    def amplitude(peak):
+        # Fixed decibel scale: quiet audio stays visible without changing an
+        # already decoded prefix when a louder section arrives later.
+        if peak <= 0 or not math.isfinite(peak):
+            return 0.
+        return max(0., min(1., (20 * math.log10(peak) + 72) / 72))
+
     def set_error(self, error):
+        self.reveal_timer.stop()
+        self.peaks = ()
         self.message = 'Не удалось построить аудиограмму'
         self.setToolTip(error)
         self.update()
@@ -93,16 +131,22 @@ class WaveformWidget(QWidget):
         p.drawLine(rect.left(), center, rect.right(), center)
         if self.peaks:
             bars = max(1, int(rect.width() / 3))
+            p.save()
+            p.setClipRect(QRectF(rect.left(), rect.top(),
+                                rect.width() * self.visible_bins / max(1, self.total_bins), rect.height()))
             for i in range(bars):
-                left = i * len(self.peaks) // bars
-                right = max(left + 1, (i + 1) * len(self.peaks) // bars)
+                left = i * self.total_bins // bars
+                if left >= min(len(self.peaks), math.ceil(self.visible_bins)):
+                    break
+                right = min(len(self.peaks), max(left + 1, (i + 1) * self.total_bins // bars))
                 peak = max(self.peaks[left:right] or (0.,))
-                height = max(.65, peak * rect.height() / 2)
+                height = max(.65, self.amplitude(peak) * rect.height() / 2)
                 x = rect.left() + (i + .5) * rect.width() / bars
                 color = QColor(c['accent'])
                 color.setAlpha(230 if (i + .5) / bars <= self.position / max(.001, self.duration) else 125)
                 p.setPen(QPen(color, 1.6, Qt.SolidLine, Qt.RoundCap))
                 p.drawLine(x, center - height, x, center + height)
+            p.restore()
         if self.message:
             p.setPen(QColor(c['muted']))
             p.drawText(self.rect(), Qt.AlignCenter, self.message)

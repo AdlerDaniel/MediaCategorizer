@@ -48,10 +48,16 @@ with tempfile.TemporaryDirectory() as directory:
     window.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
     window.load_folder(folder, selected=path)
     window.showNormal()
-    wait_for(lambda: bool(window.waveform.peaks))
+    wait_for(lambda: bool(window.waveform.peaks) and not window.waveform.reveal_timer.isActive())
     player = window._active_player()
     wait_for(lambda: player.duration() > 0 and window.video_canvas.videoSink().videoFrame().isValid())
     player.pause()
+    actual = window.waveform.peaks
+    for fraction in (.25, .5, 1.):
+        window.waveform.set_partial(actual[:round(len(actual) * fraction)], 5, len(actual))
+        settle(.4)
+        assert window.waveform.grab().save(str(output / f'progressive-{fraction}.png'))
+    window.waveform.set_data(actual, 5)
     layouts = {}
     for size in UI_SIZES:
         for theme in THEME_NAMES:

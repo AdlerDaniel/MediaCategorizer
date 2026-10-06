@@ -1754,8 +1754,21 @@ class MediaCategorizer(QMainWindow):
             return
         task = WaveformTask(path, expected)
         task.signals.waveform.connect(self._on_waveform_ready)
+        task.signals.partial.connect(self._on_waveform_partial)
         self.waveform_tasks[key] = task
         self.thread_pool.start(task)
+
+    def _on_waveform_partial(self, key, peaks, duration, bins):
+        task = self.waveform_tasks.get(key)
+        if (self._audio_closing or not task or task.job.cancelled.is_set()
+                or self.current_file != Path(key[0]) or self.file_reservations.is_busy(Path(key[0]))):
+            return
+        try:
+            if video_signature(self.current_file) != key[1]:
+                return
+        except OSError:
+            return
+        self.waveform.set_partial(peaks, duration, bins)
 
     def _on_waveform_ready(self, key, result, error):
         task = self.waveform_tasks.pop(key, None)
@@ -1783,7 +1796,7 @@ class MediaCategorizer(QMainWindow):
                 return
             self.waveform.set_error(error)
         else:
-            self.waveform.set_data(*result)
+            self.waveform.set_data(*result, animate=True)
             player = self._active_player()
             if player:
                 self.waveform.set_position(player.position() / 1000)

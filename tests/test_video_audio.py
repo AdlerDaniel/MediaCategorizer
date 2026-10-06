@@ -62,6 +62,59 @@ class VideoAudioTests(unittest.TestCase):
         self.assertLess(max(peaks[:85]), .01)
         self.assertGreater(max(peaks[120:190]), .4)
 
+    def test_real_progressive_prefix_matches_final_data(self):
+        updates = []
+        final, duration = AudioWaveform().run(self.path, signature(self.path), 300,
+                                              partial=lambda *args: updates.append(args))
+        self.assertTrue(updates)
+        previous = 0
+        for peaks, seconds, bins in updates:
+            self.assertGreater(len(peaks), previous)
+            self.assertEqual(peaks, final[:len(peaks)])
+            self.assertEqual(bins, len(final))
+            self.assertEqual(seconds, duration)
+            previous = len(peaks)
+
+    def test_quiet_high_frequency_audio_is_preserved_and_visible(self):
+        target = self.folder / 'quiet.mkv'
+        ffmpeg('-f', 'lavfi', '-i', 'color=size=160x120:duration=3',
+               '-f', 'lavfi', '-i', 'aevalsrc=0.005*sin(2*PI*12000*t):s=48000:d=3',
+               '-c:v', 'libx264', '-c:a', 'pcm_f32le', target)
+        peaks, duration = AudioWaveform().run(target, signature(target), 300)
+        self.assertGreater(min(peaks[10:290]), .004)
+        widget = WaveformWidget()
+        widget.resize(600, 62)
+        widget.set_data(peaks, duration)
+        self.assertGreater(widget.amplitude(max(peaks)), .3)
+        image = widget.grab().toImage()
+        # Audible quiet samples must extend well above the center line.
+        self.assertNotEqual(image.pixelColor(300, 22), image.pixelColor(300, 8))
+        self.assertEqual(widget.amplitude(0), 0)
+        widget.deleteLater()
+
+    def test_partial_wave_does_not_stretch_or_draw_unknown_audio(self):
+        widget = WaveformWidget()
+        widget.resize(618, 62)
+        widget.set_loading()
+        self.assertEqual(widget.message, '')
+        widget.set_partial([.5] * 50, 30, 200)
+        widget.visible_bins = 50
+        partial = widget.grab().toImage()
+        self.assertNotEqual(partial.pixelColor(40, 20), partial.pixelColor(400, 20))
+        widget.set_data([.5] * 200, 30, animate=True)
+        final = widget.grab().toImage()
+        self.assertEqual(partial.pixelColor(40, 20), final.pixelColor(40, 20))
+        self.assertEqual(widget.visible_bins, 50)
+        widget._seek(309)
+        self.assertAlmostEqual(widget.position, 15, delta=.1)
+        for _ in range(30):
+            widget._reveal()
+        self.assertEqual(widget.visible_bins, 200)
+        widget.set_loading()
+        self.assertFalse(widget.reveal_timer.isActive())
+        self.assertFalse(widget.peaks)
+        widget.deleteLater()
+
     def test_remove_all_audio_preserves_decoded_video_and_parameters(self):
         ffmpeg('-i', self.input, '-f', 'lavfi', '-i', 'sine=frequency=880:duration=3',
                '-map', '0:v', '-map', '0:a', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', self.path)

@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
@@ -13,7 +14,7 @@ from .video_export import CREATE_FLAGS, VideoExport, encoding, probe, signature,
 
 
 class AudioWaveform(VideoExport):
-    def run(self, path, expected, bins=2048):
+    def run(self, path, expected, bins=2048, partial=None):
         path = Path(path)
         self.check_cancelled()
         if signature(path) != expected:
@@ -24,10 +25,11 @@ class AudioWaveform(VideoExport):
             return (), info['duration']
         track = next((s for s in info['audio'] if s.get('disposition', {}).get('default')), info['audio'][0])
         channels = max(1, int(track.get('channels', 1)))
-        rate = 16000
+        rate = max(8000, min(192000, int(track.get('sample_rate') or 48000)))
         samples_per_bin = max(1, math.ceil(info['duration'] * rate / bins))
         peaks = [0.] * bins
         frame = 0
+        last_emitted, last_update = 0, 0.
         video_start = float(info['stream'].get('start_time') or 0)
         args = [tool('ffmpeg'), '-hide_banner', '-nostdin', '-v', 'error', '-copyts', '-i', str(path),
                 '-map', '0:' + str(track['index']), '-vn', '-af',
@@ -52,11 +54,21 @@ class AudioWaveform(VideoExport):
                     values.frombytes(chunk[:size])
                     if sys.byteorder != 'little':
                         values.byteswap()
-                    for i in range(0, len(values), channels):
+                    offset = 0
+                    while offset < len(values):
                         bucket = min(bins - 1, frame // samples_per_bin)
-                        peak = max((abs(v) for v in values[i:i + channels] if math.isfinite(v)), default=0.)
-                        peaks[bucket] = max(peaks[bucket], min(1., peak))
-                        frame += 1
+                        count = min(len(values) - offset,
+                                    (samples_per_bin - frame % samples_per_bin) * channels)
+                        peak = max(map(abs, values[offset:offset + count]), default=0.)
+                        if math.isfinite(peak):
+                            peaks[bucket] = max(peaks[bucket], min(1., peak))
+                        frame += count // channels
+                        offset += count
+                    completed = min(bins, frame // samples_per_bin)
+                    now = time.monotonic()
+                    if partial and completed > last_emitted and now - last_update >= .04:
+                        partial(tuple(peaks[:completed]), info['duration'], bins)
+                        last_emitted, last_update = completed, now
                 code = self.process.wait()
                 self.check_cancelled()
                 if code:
@@ -145,6 +157,7 @@ class RemoveAudio(VideoExport):
 
 class AudioTaskSignals(QObject):
     waveform = Signal(object, object, str)
+    partial = Signal(object, object, float, int)
     progress = Signal(int)
     finished = Signal(object, str)
 
@@ -158,7 +171,8 @@ class WaveformTask(QRunnable):
 
     def run(self):
         try:
-            result = self.job.run(self.path, self.expected)
+            result = self.job.run(self.path, self.expected, partial=lambda peaks, duration, bins:
+                                  self.signals.partial.emit((str(self.path), self.expected), peaks, duration, bins))
             self.signals.waveform.emit((str(self.path), self.expected), result, '')
         except Exception as exc:
             self.signals.waveform.emit((str(self.path), self.expected), None, str(exc))
